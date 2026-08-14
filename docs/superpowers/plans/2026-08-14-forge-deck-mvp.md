@@ -1067,36 +1067,38 @@ public class ToolScannerTests : IDisposable
     }
 
     [Fact]
-    public void KnownDirs_FindsToolInHintDir()
+    public void KnownDirs_FindsToolInHintDir_WithExtraDirsFallback()
     {
-        var npmDir = Path.Combine(_dir, "npm");
-        Directory.CreateDirectory(npmDir);
-        File.WriteAllText(Path.Combine(npmDir, "claude.cmd"), "");
-        Environment.SetEnvironmentVariable("FD_TEST_NPM", npmDir);
+        var hintDir = Path.Combine(_dir, "npm");
+        Directory.CreateDirectory(hintDir);
+        File.WriteAllText(Path.Combine(hintDir, "claude.cmd"), "");
+        var extraDir = Path.Combine(_dir, "extra");
+        Directory.CreateDirectory(extraDir);
+        File.WriteAllText(Path.Combine(extraDir, "codex.exe"), "");
+
+        Environment.SetEnvironmentVariable("FD_TEST_NPM", hintDir);
         try
         {
-            var source = new KnownDirsScanSource();
-            var hits = source.Scan(new ScanContext(Array.Empty<string>()))
-                .Where(h => h.Known?.Name == "Claude Code");
-            // KnownTools 用 %APPDATA%\npm 提示；通过子类注入测试提示目录
             var testTool = new KnownTool("Claude Code", ToolType.Cli, "C/", null,
                 new[] { "claude" }, new[] { new InstallHint("%FD_TEST_NPM%", "npm 全局") });
-            var testSource = new KnownDirsScanSourceForTest(testTool);
-            var hit = Assert.Single(testSource.Scan(new ScanContext(Array.Empty<string>())));
-            Assert.Equal("npm 全局", hit.SourceLabel);
-            Assert.EndsWith("claude.cmd", hit.ExePath);
+            var codexTool = new KnownTool("Codex CLI", ToolType.Cli, "CX", null,
+                new[] { "codex" }, Array.Empty<InstallHint>());
+            var source = new KnownDirsScanSourceForTest(new[] { testTool, codexTool });
+
+            var hits = source.Scan(new ScanContext(new[] { extraDir })).ToList();
+            var claudeHit = Assert.Single(hits, h => h.Known!.Name == "Claude Code");
+            Assert.Equal("npm 全局", claudeHit.SourceLabel);
+            Assert.EndsWith("claude.cmd", claudeHit.ExePath);
+            var codexHit = Assert.Single(hits, h => h.Known!.Name == "Codex CLI");
+            Assert.Equal("附加目录", codexHit.SourceLabel);
         }
         finally { Environment.SetEnvironmentVariable("FD_TEST_NPM", null); }
     }
 }
-```
 
-上面第 5 个测试用到的测试子类与受控构造（把 KnownTools.All 换成单工具）放在同一测试文件：
-
-```csharp
-file sealed class KnownDirsScanSourceForTest(KnownTool tool) : KnownDirsScanSource
+file sealed class KnownDirsScanSourceForTest(KnownTool[] tools) : KnownDirsScanSource
 {
-    protected override IEnumerable<KnownTool> Catalog { get { yield return tool; } }
+    protected override IEnumerable<KnownTool> Catalog => tools;
 }
 ```
 
