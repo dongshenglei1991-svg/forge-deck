@@ -1816,11 +1816,12 @@ git commit -m "feat(core): 注册表卸载项与开始菜单快捷方式扫描�
 - 创建：`src/ForgeDeck.Core/Launching/LaunchService.cs`
 - 测试：`tests/ForgeDeck.Core.Tests/LaunchServiceTests.cs`
 
-- [ ] **步骤 1：编写失败的测试**
+- [x] **步骤 1：编写失败的测试**
 
 `tests/ForgeDeck.Core.Tests/LaunchServiceTests.cs`：
 
 ```csharp
+using System.Diagnostics;
 using ForgeDeck.Core;
 using ForgeDeck.Core.Launching;
 
@@ -1963,11 +1964,12 @@ public class LaunchServiceTests : IDisposable
 
 运行：`dotnet test --filter LaunchServiceTests` → 预期编译失败。
 
-- [ ] **步骤 2：实现 LaunchService**
+- [x] **步骤 2：实现 LaunchService**
 
 `src/ForgeDeck.Core/Launching/LaunchService.cs`：
 
 ```csharp
+using System.Diagnostics;
 using System.Text;
 using ForgeDeck.Core.Scanning;
 
@@ -2073,11 +2075,11 @@ public sealed class LaunchService
 }
 ```
 
-- [ ] **步骤 3：运行测试验证通过**
+- [x] **步骤 3：运行测试验证通过**
 
 运行：`dotnet test --filter LaunchServiceTests` → 预期全部 Passed（含 4 条 InlineData）。
 
-- [ ] **步骤 4：Commit**
+- [x] **步骤 4：Commit**
 
 ```bash
 git add src/ForgeDeck.Core tests/ForgeDeck.Core.Tests
