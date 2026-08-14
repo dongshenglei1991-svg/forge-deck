@@ -784,7 +784,7 @@ namespace ForgeDeck.Core.Tests;
 public class WorkdirHistoryTests : IDisposable
 {
     private readonly string _path = Path.Combine(Path.GetTempPath(), "forgedeck-tests", $"{Guid.NewGuid():N}.json");
-    private readonly ConfigStore _store = new();
+    private readonly ConfigStore _store;
 
     public WorkdirHistoryTests() { _store = new ConfigStore(_path); _store.Load(); }
     public void Dispose() { try { File.Delete(_path); } catch { } }
@@ -840,6 +840,69 @@ public class WorkdirHistoryTests : IDisposable
         service.Remove(@"D:\a");
         Assert.Equal(new[] { @"D:\b" }, service.List());
     }
+
+    [Fact]
+    public void Add_PathCaseDifference_Deduped_KeepsLatestForm()
+    {
+        var service = new WorkdirHistoryService(_store);
+        service.Add(@"D:\P");
+        service.Add(@"d:\p");
+        Assert.Equal(new[] { @"d:\p" }, service.List());
+    }
+
+    [Fact]
+    public void Remove_PathCaseDifference_DeletesEntry()
+    {
+        var service = new WorkdirHistoryService(_store);
+        service.Add(@"D:\Projects");
+        service.Remove(@"d:\projects");
+        Assert.Empty(service.List());
+    }
+
+    [Fact]
+    public void Add_TrimsSurroundingWhitespace()
+    {
+        var service = new WorkdirHistoryService(_store);
+        service.Add("  D:\\a  ");
+        Assert.Equal(new[] { @"D:\a" }, service.List());
+    }
+
+    [Fact]
+    public void Add_MaxHistoryZero_ClampsToOne()
+    {
+        _store.Config.Settings.MaxWorkdirHistory = 0;
+        var service = new WorkdirHistoryService(_store);
+        service.Add(@"D:\only");
+        Assert.Equal(new[] { @"D:\only" }, service.List());
+    }
+
+    [Fact]
+    public void Add_NullPath_Ignored_NoThrow()
+    {
+        var service = new WorkdirHistoryService(_store);
+        service.Add(null!);
+        Assert.Empty(service.List());
+    }
+
+    [Fact]
+    public void List_ReturnsSnapshot_MutationDoesNotLeakIntoStore()
+    {
+        var service = new WorkdirHistoryService(_store);
+        service.Add(@"D:\a");
+        ((List<string>)service.List()).Add(@"D:\evil");
+        Assert.Single(service.List());
+    }
+
+    [Fact]
+    public void NullHistoryValue_ListAddRemove_AllSafe()
+    {
+        _store.Config.WorkdirHistory[WorkdirHistoryService.GlobalKey] = null!;
+        var service = new WorkdirHistoryService(_store);
+        Assert.Empty(service.List());
+        service.Remove(@"D:\ghost"); // 不应抛异常
+        service.Add(@"D:\a");        // 重建列表
+        Assert.Equal(new[] { @"D:\a" }, service.List());
+    }
 }
 ```
 
@@ -852,8 +915,6 @@ public class WorkdirHistoryTests : IDisposable
 `src/ForgeDeck.Core/Config/WorkdirHistoryService.cs`：
 
 ```csharp
-using ForgeDeck.Core;
-
 namespace ForgeDeck.Core.Config;
 
 public sealed class WorkdirHistoryService(ConfigStore store)
@@ -861,16 +922,16 @@ public sealed class WorkdirHistoryService(ConfigStore store)
     public const string GlobalKey = "__global__";
 
     public IReadOnlyList<string> List() =>
-        store.Config.WorkdirHistory.TryGetValue(GlobalKey, out var list)
-            ? list
+        store.Config.WorkdirHistory.TryGetValue(GlobalKey, out var list) && list is not null
+            ? list.ToList()
             : Array.Empty<string>();
 
     public void Add(string path)
     {
+        if (string.IsNullOrWhiteSpace(path)) return;
         path = path.Trim();
-        if (path.Length == 0) return;
         var list = Ensure();
-        list.Remove(path);
+        list.RemoveAll(x => string.Equals(x, path, StringComparison.OrdinalIgnoreCase));
         list.Insert(0, path);
         var max = Math.Max(1, store.Config.Settings.MaxWorkdirHistory);
         if (list.Count > max) list.RemoveRange(max, list.Count - max);
@@ -879,13 +940,15 @@ public sealed class WorkdirHistoryService(ConfigStore store)
 
     public void Remove(string path)
     {
-        if (store.Config.WorkdirHistory.TryGetValue(GlobalKey, out var list) && list.Remove(path.Trim()))
+        if (string.IsNullOrWhiteSpace(path)) return;
+        if (store.Config.WorkdirHistory.TryGetValue(GlobalKey, out var list) && list is not null
+            && list.RemoveAll(x => string.Equals(x, path.Trim(), StringComparison.OrdinalIgnoreCase)) > 0)
             store.Save();
     }
 
     private List<string> Ensure()
     {
-        if (!store.Config.WorkdirHistory.TryGetValue(GlobalKey, out var list))
+        if (!store.Config.WorkdirHistory.TryGetValue(GlobalKey, out var list) || list is null)
         {
             list = new List<string>();
             store.Config.WorkdirHistory[GlobalKey] = list;
@@ -897,7 +960,7 @@ public sealed class WorkdirHistoryService(ConfigStore store)
 
 - [ ] **步骤 3：运行测试验证通过**
 
-运行：`dotnet test --filter WorkdirHistoryTests` → 预期 6 Passed。
+运行：`dotnet test --filter WorkdirHistoryTests` → 预期 13 Passed。
 
 - [ ] **步骤 4：Commit**
 

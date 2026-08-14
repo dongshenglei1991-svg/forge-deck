@@ -61,4 +61,67 @@ public class WorkdirHistoryTests : IDisposable
         service.Remove(@"D:\a");
         Assert.Equal(new[] { @"D:\b" }, service.List());
     }
+
+    [Fact]
+    public void Add_PathCaseDifference_Deduped_KeepsLatestForm()
+    {
+        var service = new WorkdirHistoryService(_store);
+        service.Add(@"D:\P");
+        service.Add(@"d:\p");
+        Assert.Equal(new[] { @"d:\p" }, service.List());
+    }
+
+    [Fact]
+    public void Remove_PathCaseDifference_DeletesEntry()
+    {
+        var service = new WorkdirHistoryService(_store);
+        service.Add(@"D:\Projects");
+        service.Remove(@"d:\projects");
+        Assert.Empty(service.List());
+    }
+
+    [Fact]
+    public void Add_TrimsSurroundingWhitespace()
+    {
+        var service = new WorkdirHistoryService(_store);
+        service.Add("  D:\\a  ");
+        Assert.Equal(new[] { @"D:\a" }, service.List());
+    }
+
+    [Fact]
+    public void Add_MaxHistoryZero_ClampsToOne()
+    {
+        _store.Config.Settings.MaxWorkdirHistory = 0;
+        var service = new WorkdirHistoryService(_store);
+        service.Add(@"D:\only");
+        Assert.Equal(new[] { @"D:\only" }, service.List());
+    }
+
+    [Fact]
+    public void Add_NullPath_Ignored_NoThrow()
+    {
+        var service = new WorkdirHistoryService(_store);
+        service.Add(null!);
+        Assert.Empty(service.List());
+    }
+
+    [Fact]
+    public void List_ReturnsSnapshot_MutationDoesNotLeakIntoStore()
+    {
+        var service = new WorkdirHistoryService(_store);
+        service.Add(@"D:\a");
+        ((List<string>)service.List()).Add(@"D:\evil");
+        Assert.Single(service.List());
+    }
+
+    [Fact]
+    public void NullHistoryValue_ListAddRemove_AllSafe()
+    {
+        _store.Config.WorkdirHistory[WorkdirHistoryService.GlobalKey] = null!;
+        var service = new WorkdirHistoryService(_store);
+        Assert.Empty(service.List());
+        service.Remove(@"D:\ghost"); // 不应抛异常
+        service.Add(@"D:\a");        // 重建列表
+        Assert.Equal(new[] { @"D:\a" }, service.List());
+    }
 }
