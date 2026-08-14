@@ -54,5 +54,7 @@ public static class KnownTools
     }
 
     public static KnownTool? MatchByName(string displayName) =>
-        All.FirstOrDefault(t => displayName.Contains(t.Name, StringComparison.OrdinalIgnoreCase));
+        All.Where(t => displayName.Contains(t.Name, StringComparison.OrdinalIgnoreCase))
+          .OrderByDescending(t => t.Name.Length)
+          .FirstOrDefault();
 }
