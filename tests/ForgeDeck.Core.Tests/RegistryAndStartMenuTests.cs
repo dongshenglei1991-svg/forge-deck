@@ -36,6 +36,44 @@ public class RegistryAndStartMenuTests : IDisposable
     }
 
     [Fact]
+    public void RegistrySource_FallsBackToInstallLocation_WhenIconNotExecutable()
+    {
+        var exe = Path.Combine(_dir, "Cursor.exe");
+        File.WriteAllText(exe, "");
+        var ico = Path.Combine(_dir, "cursor.ico");
+        File.WriteAllText(ico, "");
+        using (var key = Registry.CurrentUser.CreateSubKey($@"{TestUninstallKey}\CursorIco"))
+        {
+            key.SetValue("DisplayName", "Cursor Editor");
+            key.SetValue("InstallLocation", _dir);
+            key.SetValue("DisplayIcon", ico);   // 指向 .ico：存在但非可执行 → 回落 InstallLocation
+        }
+
+        var source = new RegistryScanSource(new RegistryUninstallRegistry(new[] { TestUninstallKey }));
+        var hit = Assert.Single(source.Scan(new ScanContext(Array.Empty<string>())));
+        Assert.Equal("Cursor", hit.Known!.Name);
+        Assert.Equal("注册表", hit.SourceLabel);
+        Assert.Equal(Path.GetFullPath(exe), hit.ExePath);
+    }
+
+    [Fact]
+    public void RegistrySource_ToleratesNonStringRegistryValues()
+    {
+        var exe = Path.Combine(_dir, "Cursor.exe");
+        File.WriteAllText(exe, "");
+        using (var key = Registry.CurrentUser.CreateSubKey($@"{TestUninstallKey}\CursorBadIcon"))
+        {
+            key.SetValue("DisplayName", "Cursor Editor");
+            key.SetValue("InstallLocation", _dir);
+            key.SetValue("DisplayIcon", 5, RegistryValueKind.DWord);   // 畸形 REG_DWORD：不应抛 InvalidCastException
+        }
+
+        var source = new RegistryScanSource(new RegistryUninstallRegistry(new[] { TestUninstallKey }));
+        var hit = Assert.Single(source.Scan(new ScanContext(Array.Empty<string>())));
+        Assert.Equal(Path.GetFullPath(exe), hit.ExePath);
+    }
+
+    [Fact]
     public void RegistrySource_SkipsUnrelatedEntries()
     {
         using (var key = Registry.CurrentUser.CreateSubKey($@"{TestUninstallKey}\RandomApp"))
@@ -61,8 +99,9 @@ public class RegistryAndStartMenuTests : IDisposable
         Assert.Equal(exe, resolver.ResolveTarget(lnkPath));
 
         var menuDir = Path.Combine(_dir, "StartMenu");
-        Directory.CreateDirectory(menuDir);
-        var lnk2 = Path.Combine(menuDir, "Claude2.lnk");
+        var subDir = Path.Combine(menuDir, "Sub");   // 子目录：覆盖递归枚举路径
+        Directory.CreateDirectory(subDir);
+        var lnk2 = Path.Combine(subDir, "Claude2.lnk");
         dynamic sc2 = shell.CreateShortcut(lnk2);
         sc2.TargetPath = exe;
         sc2.Save();

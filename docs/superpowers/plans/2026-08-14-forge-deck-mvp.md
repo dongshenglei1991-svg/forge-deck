@@ -1534,6 +1534,44 @@ public class RegistryAndStartMenuTests : IDisposable
     }
 
     [Fact]
+    public void RegistrySource_FallsBackToInstallLocation_WhenIconNotExecutable()
+    {
+        var exe = Path.Combine(_dir, "Cursor.exe");
+        File.WriteAllText(exe, "");
+        var ico = Path.Combine(_dir, "cursor.ico");
+        File.WriteAllText(ico, "");
+        using (var key = Registry.CurrentUser.CreateSubKey($@"{TestUninstallKey}\CursorIco"))
+        {
+            key.SetValue("DisplayName", "Cursor Editor");
+            key.SetValue("InstallLocation", _dir);
+            key.SetValue("DisplayIcon", ico);   // 指向 .ico：存在但非可执行 → 回落 InstallLocation
+        }
+
+        var source = new RegistryScanSource(new RegistryUninstallRegistry(new[] { TestUninstallKey }));
+        var hit = Assert.Single(source.Scan(new ScanContext(Array.Empty<string>())));
+        Assert.Equal("Cursor", hit.Known!.Name);
+        Assert.Equal("注册表", hit.SourceLabel);
+        Assert.Equal(Path.GetFullPath(exe), hit.ExePath);
+    }
+
+    [Fact]
+    public void RegistrySource_ToleratesNonStringRegistryValues()
+    {
+        var exe = Path.Combine(_dir, "Cursor.exe");
+        File.WriteAllText(exe, "");
+        using (var key = Registry.CurrentUser.CreateSubKey($@"{TestUninstallKey}\CursorBadIcon"))
+        {
+            key.SetValue("DisplayName", "Cursor Editor");
+            key.SetValue("InstallLocation", _dir);
+            key.SetValue("DisplayIcon", 5, RegistryValueKind.DWord);   // 畸形 REG_DWORD：不应抛 InvalidCastException
+        }
+
+        var source = new RegistryScanSource(new RegistryUninstallRegistry(new[] { TestUninstallKey }));
+        var hit = Assert.Single(source.Scan(new ScanContext(Array.Empty<string>())));
+        Assert.Equal(Path.GetFullPath(exe), hit.ExePath);
+    }
+
+    [Fact]
     public void RegistrySource_SkipsUnrelatedEntries()
     {
         using (var key = Registry.CurrentUser.CreateSubKey($@"{TestUninstallKey}\RandomApp"))
@@ -1559,8 +1597,9 @@ public class RegistryAndStartMenuTests : IDisposable
         Assert.Equal(exe, resolver.ResolveTarget(lnkPath));
 
         var menuDir = Path.Combine(_dir, "StartMenu");
-        Directory.CreateDirectory(menuDir);
-        var lnk2 = Path.Combine(menuDir, "Claude2.lnk");
+        var subDir = Path.Combine(menuDir, "Sub");   // 子目录：覆盖递归枚举路径
+        Directory.CreateDirectory(subDir);
+        var lnk2 = Path.Combine(subDir, "Claude2.lnk");
         dynamic sc2 = shell.CreateShortcut(lnk2);
         sc2.TargetPath = exe;
         sc2.Save();
@@ -1621,9 +1660,9 @@ public sealed class RegistryUninstallRegistry : IUninstallRegistry
                     using var item = key.OpenSubKey(sub);
                     if (item == null) continue;
                     yield return new RegistryEntry(
-                        (string?)item.GetValue("DisplayName") ?? "",
-                        (string?)item.GetValue("InstallLocation") ?? "",
-                        (string?)item.GetValue("DisplayIcon") ?? "");
+                        item.GetValue("DisplayName") as string ?? "",
+                        item.GetValue("InstallLocation") as string ?? "",
+                        item.GetValue("DisplayIcon") as string ?? "");   // as：畸形 REG_DWORD 等不抛 InvalidCast
                 }
             }
     }
@@ -1645,8 +1684,11 @@ public sealed class RegistryScanSource(IUninstallRegistry registry) : IScanSourc
 
     private static string? ResolveExe(RegistryEntry entry, KnownTool known)
     {
+        // DisplayIcon 常指向 .ico/.dll 资源（如 "app.exe,0" / "app.ico" / "imageres.dll,-101"），
+        // 仅当其为可启动扩展名且 exe 名与已知工具一致时直取，否则回落 InstallLocation 探测。
         var icon = entry.DisplayIcon.Split(',')[0].Trim().Trim('"');
         if (icon.Length > 0 && File.Exists(icon)
+            && PathSearch.CliExtensions.Contains(Path.GetExtension(icon), StringComparer.OrdinalIgnoreCase)
             && KnownTools.MatchByExeName(icon)?.Name == known.Name)
             return Path.GetFullPath(icon);
 
@@ -1663,8 +1705,6 @@ public sealed class RegistryScanSource(IUninstallRegistry registry) : IScanSourc
 `src/ForgeDeck.Core/Scanning/StartMenuScanSource.cs`：
 
 ```csharp
-using System.Runtime.InteropServices;
-
 namespace ForgeDeck.Core.Scanning;
 
 public interface IShellLinkResolver
@@ -1683,8 +1723,10 @@ public sealed class WScriptShellLinkResolver : IShellLinkResolver
             var target = (string)shortcut.TargetPath;
             return target.Length > 0 ? target : null;
         }
-        catch (COMException)
+        catch (Exception)
         {
+            // 按单文件失败处理：ProgID 缺失（ArgumentNullException）、dynamic 绑定失败
+            // （RuntimeBinderException）等环境异常不应冒泡废掉整个开始菜单源。
             return null;
         }
     }
@@ -1705,7 +1747,15 @@ public class StartMenuScanSource(IShellLinkResolver resolver) : IScanSource
         foreach (var dir in MenuDirs)
         {
             if (!Directory.Exists(dir)) continue;
-            foreach (var lnk in Directory.EnumerateFiles(dir, "*.lnk", SearchOption.AllDirectories))
+            // IgnoreInaccessible：跳过 ACL 拒绝的不可访问子目录，避免整源报废（被源级隔离静默吞掉）；
+            // AttributesToSkip = 0 必须显式设置：默认 Hidden|System 会静默跳过隐藏属性的 .lnk，改变语义。
+            var eo = new EnumerationOptions
+            {
+                RecurseSubdirectories = true,
+                IgnoreInaccessible = true,
+                AttributesToSkip = 0,
+            };
+            foreach (var lnk in Directory.EnumerateFiles(dir, "*.lnk", eo))
             {
                 var target = resolver.ResolveTarget(lnk);
                 if (target == null || !File.Exists(target)) continue;
@@ -1749,6 +1799,14 @@ git commit -m "feat(core): 注册表卸载项与开始菜单快捷方式扫描�
         }
     }
 ```
+
+- [x] **步骤 6（质量审查修复）：开始菜单枚举容错与解析异常面收紧**
+
+审查发现三处问题，均已修复并随 `fix(core): 开始菜单枚举容错与解析异常面收紧` 提交：
+
+1. `StartMenuScanSource` 的 `Directory.EnumerateFiles(dir, "*.lnk", SearchOption.AllDirectories)` 遇不可访问子目录抛 `UnauthorizedAccessException` 且已产出为 0（整源报废、被源级隔离静默吞掉）。改用 `new EnumerationOptions { RecurseSubdirectories = true, IgnoreInaccessible = true, AttributesToSkip = 0 }`——`AttributesToSkip = 0` 必须显式设置（默认 Hidden|System 会静默跳过隐藏属性的 .lnk，改变语义）。
+2. `WScriptShellLinkResolver.ResolveTarget` 的 catch 从 `COMException` 放宽为 `catch (Exception)`（ProgID 缺失/RuntimeBinderException 等环境异常按单文件失败处理，不应废源）；`RegistryScanSource` 的 `(string?)item.GetValue(...)` 改为 `item.GetValue(...) as string` 消除畸形 REG_DWORD 的 `InvalidCastException` 面。
+3. 测试覆盖缺口补齐：`RegistrySource_FallsBackToInstallLocation_WhenIconNotExecutable`（DisplayIcon 指向 .ico → 回落 InstallLocation，红测试还暴露了 `MatchByExeName("cursor.ico")` 同名命中导致 .ico 被当作可执行返回的缺陷，已在 ResolveExe 加 `PathSearch.CliExtensions` 扩展名白名单）、`RegistrySource_ToleratesNonStringRegistryValues`（REG_DWORD 容错，红→绿证据）、`StartMenuSource_ResolvesLnkTarget` 的 .lnk 移入 menuDir 子目录（覆盖递归枚举路径）。
 
 ---
 

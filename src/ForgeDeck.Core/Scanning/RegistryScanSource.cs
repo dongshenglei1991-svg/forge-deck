@@ -34,9 +34,9 @@ public sealed class RegistryUninstallRegistry : IUninstallRegistry
                     using var item = key.OpenSubKey(sub);
                     if (item == null) continue;
                     yield return new RegistryEntry(
-                        (string?)item.GetValue("DisplayName") ?? "",
-                        (string?)item.GetValue("InstallLocation") ?? "",
-                        (string?)item.GetValue("DisplayIcon") ?? "");
+                        item.GetValue("DisplayName") as string ?? "",
+                        item.GetValue("InstallLocation") as string ?? "",
+                        item.GetValue("DisplayIcon") as string ?? "");   // as：畸形 REG_DWORD 等不抛 InvalidCast
                 }
             }
     }
@@ -58,8 +58,11 @@ public sealed class RegistryScanSource(IUninstallRegistry registry) : IScanSourc
 
     private static string? ResolveExe(RegistryEntry entry, KnownTool known)
     {
+        // DisplayIcon 常指向 .ico/.dll 资源（如 "app.exe,0" / "app.ico" / "imageres.dll,-101"），
+        // 仅当其为可启动扩展名且 exe 名与已知工具一致时直取，否则回落 InstallLocation 探测。
         var icon = entry.DisplayIcon.Split(',')[0].Trim().Trim('"');
         if (icon.Length > 0 && File.Exists(icon)
+            && PathSearch.CliExtensions.Contains(Path.GetExtension(icon), StringComparer.OrdinalIgnoreCase)
             && KnownTools.MatchByExeName(icon)?.Name == known.Name)
             return Path.GetFullPath(icon);
 
