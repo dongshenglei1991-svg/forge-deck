@@ -399,7 +399,7 @@ const ICONS = {
 
 export function Rail({ view, onView, version }: { view: View; onView: (v: View) => void; version: string }) {
   const item = (v: View, label: string) => (
-    <button className={view === v ? 'active' : ''} aria-selected={view === v} onClick={() => onView(v)}>
+    <button className={view === v ? 'active' : ''} aria-current={view === v ? 'page' : undefined} onClick={() => onView(v)}>
       {ICONS[v]}<span>{label}</span>
     </button>
   );
@@ -410,13 +410,13 @@ export function Rail({ view, onView, version }: { view: View; onView: (v: View) 
         <div><strong>forge</strong><small>TOOL LAUNCHER</small></div>
       </div>
       <div className="nav-label">工作台</div>
-      <nav className="nav" aria-label="主导航">
+      <nav className="nav" aria-label="工作台">
         {item('launcher', '快速启动')}
         {item('tools', '工具库')}
         {item('sessions', '终端会话')}
       </nav>
       <div className="nav-label">系统</div>
-      <nav className="nav">{item('settings', '设置')}</nav>
+      <nav className="nav" aria-label="系统">{item('settings', '设置')}</nav>
       <div className="rail-foot">
         <span className="status-dot" />扫描服务正常<br />
         <span className="mono">{version || 'v0.1.0 · Windows'}</span>
