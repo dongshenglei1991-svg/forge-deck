@@ -1489,8 +1489,9 @@ git commit -m "feat(core): 已知工具目录、PATH/目录探测与扫描聚合
 **文件：**
 - 创建：`src/ForgeDeck.Core/Scanning/RegistryScanSource.cs`、`src/ForgeDeck.Core/Scanning/StartMenuScanSource.cs`
 - 测试：`tests/ForgeDeck.Core.Tests/RegistryAndStartMenuTests.cs`
+- 修改：`tests/ForgeDeck.Core.Tests/ToolScannerTests.cs`（一个小改进，见步骤 5）
 
-- [ ] **步骤 1：编写失败的测试**
+- [x] **步骤 1：编写失败的测试**
 
 `tests/ForgeDeck.Core.Tests/RegistryAndStartMenuTests.cs`：
 
@@ -1557,7 +1558,6 @@ public class RegistryAndStartMenuTests : IDisposable
         var resolver = new WScriptShellLinkResolver();
         Assert.Equal(exe, resolver.ResolveTarget(lnkPath));
 
-        // 目录级验证：把 .lnk 放进伪造的开始菜单目录
         var menuDir = Path.Combine(_dir, "StartMenu");
         Directory.CreateDirectory(menuDir);
         var lnk2 = Path.Combine(menuDir, "Claude2.lnk");
@@ -1580,7 +1580,7 @@ file sealed class StartMenuScanSourceForTest(IShellLinkResolver resolver, string
 
 运行：`dotnet test --filter RegistryAndStartMenuTests` → 预期编译失败。
 
-- [ ] **步骤 2：实现两个扫描源**
+- [x] **步骤 2：实现两个扫描源**
 
 `src/ForgeDeck.Core/Scanning/RegistryScanSource.cs`：
 
@@ -1720,15 +1720,34 @@ public class StartMenuScanSource(IShellLinkResolver resolver) : IScanSource
 
 测试项目需要 COM 互运用 dynamic：`tests/ForgeDeck.Core.Tests/ForgeDeck.Core.Tests.csproj` 确认含 `<UseRidSourceGenerate>false</UseRidSourceGenerate>` 不需要；`dynamic` 在 net8.0 开箱可用，无需额外包。
 
-- [ ] **步骤 3：运行测试验证通过**
+实施备注：注册表/COM API 带 `[SupportedOSPlatform("windows")]`，纯 `net8.0` 目标会触发 CA1416 平台兼容警告（与「build 0 警告」门槛冲突）。故将 `src/ForgeDeck.Core/ForgeDeck.Core.csproj` 与 `tests/ForgeDeck.Core.Tests/ForgeDeck.Core.Tests.csproj` 的 TargetFramework 改为 `net8.0-windows`（App 本就是 `net8.0-windows`，产品为 Windows 专用启动器；净效果 0 警告，代码本身不变）。
 
-运行：`dotnet test --filter RegistryAndStartMenuTests` → 预期 3 Passed。
+- [x] **步骤 3：运行测试验证通过**
 
-- [ ] **步骤 4：Commit**
+运行：`dotnet test --filter RegistryAndStartMenuTests` → 预期 3 Passed；全量 `dotnet test` → 全绿（30+3=33 左右）；`dotnet build` → 0 警告。
+
+- [x] **步骤 4：Commit**
 
 ```bash
 git add src/ForgeDeck.Core tests/ForgeDeck.Core.Tests
 git commit -m "feat(core): 注册表卸载项与开始菜单快捷方式扫描源"
+```
+
+- [x] **步骤 5（本任务追加）：ThrowingSource 迭代器化**
+
+`tests/ForgeDeck.Core.Tests/ToolScannerTests.cs` 里的 `ThrowingSource` 当前是 `=> throw` 表达式体（调用即抛），改为迭代器形式（先 `yield return` 一条指向不存在路径的假 hit，再 `throw new InvalidOperationException("源爆炸")`），使 `Scan_ContinuesWhenSourceThrows` 真正覆盖 MoveNext 期间抛异常的路径。改完确认全量测试仍绿，随本任务一起提交：
+
+```csharp
+    private sealed class ThrowingSource : IScanSource
+    {
+        // 迭代器形式：先产出一条指向不存在路径的假 hit，再在枚举（MoveNext）期间抛异常，
+        // 使 Scan_ContinuesWhenSourceThrows 覆盖 ToolScanner 立即枚举期间的异常隔离路径。
+        public IEnumerable<ScanHit> Scan(ScanContext context)
+        {
+            yield return new ScanHit(Path.Combine(Path.GetTempPath(), "forgedeck-ghost.exe"), null, "爆炸源");
+            throw new InvalidOperationException("源爆炸");
+        }
+    }
 ```
 
 ---

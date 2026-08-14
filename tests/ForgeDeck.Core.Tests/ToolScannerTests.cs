@@ -25,7 +25,13 @@ public class ToolScannerTests : IDisposable
 
     private sealed class ThrowingSource : IScanSource
     {
-        public IEnumerable<ScanHit> Scan(ScanContext context) => throw new InvalidOperationException("源爆炸");
+        // 迭代器形式：先产出一条指向不存在路径的假 hit，再在枚举（MoveNext）期间抛异常，
+        // 使 Scan_ContinuesWhenSourceThrows 覆盖 ToolScanner 立即枚举期间的异常隔离路径。
+        public IEnumerable<ScanHit> Scan(ScanContext context)
+        {
+            yield return new ScanHit(Path.Combine(Path.GetTempPath(), "forgedeck-ghost.exe"), null, "爆炸源");
+            throw new InvalidOperationException("源爆炸");
+        }
     }
 
     private static readonly KnownTool Claude =
