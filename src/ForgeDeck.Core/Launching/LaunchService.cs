@@ -35,13 +35,30 @@ public sealed class LaunchService
         return result;
     }
 
-    public LaunchCommand BuildCommand(ToolInfo tool, LaunchProfile profile)
+    /// <summary>PowerShell 宿主三级回退：PATH 上的 pwsh → PATH 上的 powershell → System32 全路径。</summary>
+    private static string ResolvePowerShellHost() =>
+        PathSearch.FindOnPath("pwsh")
+        ?? PathSearch.FindOnPath("powershell")
+        ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "powershell.exe");
+
+    /// <summary>分词结果 + AutoRestore 追加的 ResumeArgs（已含则不重复）——内嵌/外部双轨共用。</summary>
+    private static List<string> EffectiveArgs(ToolInfo tool, LaunchProfile profile)
     {
-        var ext = Path.GetExtension(tool.ExePath).ToLowerInvariant();
         var args = SplitArgs(profile.Args).ToList();
         var known = KnownTools.MatchByExeName(tool.ExePath);
         if (profile.AutoRestore && known?.ResumeArgs is { } resume && !args.Contains(resume))
             args.Add(resume);
+        return args;
+    }
+
+    /// <summary>含空白的参数重新加引号（避免重组命令行时裂成多个参数）。</summary>
+    private static string QuoteIfSpaced(string token) =>
+        token.Any(char.IsWhiteSpace) ? $"\"{token}\"" : token;
+
+    public LaunchCommand BuildCommand(ToolInfo tool, LaunchProfile profile)
+    {
+        var ext = Path.GetExtension(tool.ExePath).ToLowerInvariant();
+        var args = EffectiveArgs(tool, profile);
         return ext switch
         {
             ".exe" => new LaunchCommand(tool.ExePath, args),
@@ -49,7 +66,7 @@ public sealed class LaunchService
                 Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe"),
                 new[] { "/c", tool.ExePath }.Concat(args).ToList()),
             ".ps1" => new LaunchCommand(
-                PathSearch.FindOnPath("pwsh") ?? "powershell.exe",
+                ResolvePowerShellHost(),
                 new[] { "-File", tool.ExePath }.Concat(args).ToList()),
             _ => throw new NotSupportedException($"不支持的启动文件类型：{ext}"),
         };
@@ -83,10 +100,14 @@ public sealed class LaunchService
     public ProcessStartInfo BuildExternalStartInfo(ToolInfo tool, LaunchProfile profile)
     {
         Validate(tool, profile);
+        var ext = Path.GetExtension(tool.ExePath).ToLowerInvariant();
+        // 外部轨道：分词重组（AutoRestore 追加 ResumeArgs），含空白的参数重新引用；
+        // .ps1 由 PowerShell 宿主包装执行（CreateProcess 无法直接执行脚本，与内嵌轨道语义一致）。
+        var joined = string.Join(' ', EffectiveArgs(tool, profile).Select(QuoteIfSpaced));
         var psi = new ProcessStartInfo
         {
-            FileName = tool.ExePath,
-            Arguments = profile.Args,
+            FileName = ext == ".ps1" ? ResolvePowerShellHost() : tool.ExePath,
+            Arguments = ext == ".ps1" ? $"-File \"{tool.ExePath}\"{(joined.Length > 0 ? " " + joined : "")}" : joined,
             WorkingDirectory = ResolveWorkdir(profile),
             UseShellExecute = false,
         };

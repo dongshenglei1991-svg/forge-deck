@@ -1822,6 +1822,7 @@ git commit -m "feat(core): 注册表卸载项与开始菜单快捷方式扫描�
 
 ```csharp
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using ForgeDeck.Core;
 using ForgeDeck.Core.Launching;
 
@@ -1844,6 +1845,8 @@ public class LaunchServiceTests : IDisposable
     [InlineData("", new string[0])]
     [InlineData("  --a   --b  ", new[] { "--a", "--b" })]
     [InlineData("'quoted arg'", new[] { "quoted arg" })]
+    [InlineData(@"--model ""unclosed", new[] { "--model", "unclosed" })]
+    [InlineData(@"/x """" /y", new[] { "/x", "", "/y" })]
     public void SplitArgs_HandlesQuotesAndWhitespace(string input, string[] expected)
     {
         Assert.Equal(expected, LaunchService.SplitArgs(input));
@@ -1891,6 +1894,14 @@ public class LaunchServiceTests : IDisposable
     }
 
     [Fact]
+    public void BuildCommand_UnsupportedExtension_Throws()
+    {
+        var py = Path.Combine(_dir, "tool.py");
+        File.WriteAllText(py, "");
+        Assert.Throws<NotSupportedException>(() => _service.BuildCommand(Tool(py), Profile()));
+    }
+
+    [Fact]
     public void Validate_MissingExe_ThrowsWithMessage()
     {
         var ex = Assert.Throws<InvalidOperationException>(
@@ -1912,7 +1923,7 @@ public class LaunchServiceTests : IDisposable
     {
         var exe = Path.Combine(_dir, "tool.exe");
         File.WriteAllText(exe, "");
-        _service.Validate(Tool(exe), Profile()); // 不抛即通过
+        _service.Validate(Tool(exe), Profile());
         Assert.Equal(
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
             LaunchService.ResolveWorkdir(Profile()));
@@ -1943,22 +1954,67 @@ public class LaunchServiceTests : IDisposable
         profile.Env["K"] = "V";
         var psi = _service.BuildExternalStartInfo(Tool(exe), profile);
         Assert.Equal(exe, psi.FileName);
-        Assert.Equal("--model \"sonnet 4\"", psi.Arguments);   // 外部启动保留原始串
+        // 外部启动：分词重组，含空白的参数重新引用（"sonnet 4" 不裂成两个参数）
+        Assert.Equal("--model \"sonnet 4\"", psi.Arguments);
         Assert.Equal(_dir, psi.WorkingDirectory);
         Assert.Equal("V", psi.EnvironmentVariables["K"]);
         Assert.False(psi.UseShellExecute);
     }
 
     [Fact]
+    public void BuildExternalStartInfo_Ps1_WrapsWithPowerShellHost()
+    {
+        var script = Path.Combine(_dir, "tool.ps1");
+        File.WriteAllText(script, "");
+        var psi = _service.BuildExternalStartInfo(Tool(script), Profile("-Flag x", _dir));
+        Assert.True(psi.FileName.Contains("pwsh") || psi.FileName.Contains("powershell"), $"实际 FileName: {psi.FileName}");
+        Assert.Equal($"-File \"{script}\" -Flag x", psi.Arguments);
+    }
+
+    [Fact]
+    public void BuildExternalStartInfo_ClaudeAutoRestore_AppendsResumeArgs()
+    {
+        var script = Path.Combine(_dir, "claude.cmd");
+        File.WriteAllText(script, "");
+        var psi = _service.BuildExternalStartInfo(Tool(script), Profile("--model x", _dir, autoRestore: true));
+        Assert.Equal("--model x --continue", psi.Arguments);
+    }
+
+    [Fact]
     public void LaunchExternal_CmdExitsWithCode()
     {
         var cmdPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe");
-        var tool = Tool(cmdPath);
-        var profile = Profile("/c exit 3", _dir);
-        using var process = Process.Start(_service.BuildExternalStartInfo(tool, profile))!;
-        Assert.True(process.WaitForExit(5000));
-        Assert.Equal(3, process.ExitCode);
+        var pid = _service.LaunchExternal(Tool(cmdPath), Profile("/c exit 3", _dir));
+        Assert.Equal(3, WaitForExitCode(pid, 5000));
     }
+
+    [Fact]
+    public void LaunchExternal_Ps1Script_ExitsWithCode()
+    {
+        var script = Path.Combine(_dir, "exit5.ps1");
+        File.WriteAllText(script, "exit 5");
+        var pid = _service.LaunchExternal(Tool(script), Profile(workdir: _dir));
+        Assert.Equal(5, WaitForExitCode(pid, 15000));
+    }
+
+    /// <summary>
+    /// GetProcessById 得到的 Process 组件在 .NET 上不填充 ExitCode
+    /// （抛 "Process was not started by this object"），故经句柄 P/Invoke 取退出码；
+    /// 句柄须在等待退出之前取得（进程退出后 Handle 会重新 OpenProcess 并失败）。
+    /// </summary>
+    private static int WaitForExitCode(int pid, int timeoutMs)
+    {
+        using var process = Process.GetProcessById(pid);
+        var handle = process.Handle;
+        if (!process.WaitForExit(timeoutMs))
+            throw new TimeoutException($"进程 {pid} 在 {timeoutMs}ms 内未退出");
+        if (!GetExitCodeProcess(handle, out var code))
+            throw new InvalidOperationException($"获取进程 {pid} 退出码失败");
+        return code;
+    }
+
+    [DllImport("kernel32.dll")]
+    private static extern bool GetExitCodeProcess(IntPtr hProcess, out int lpExitCode);
 }
 ```
 
@@ -2006,13 +2062,30 @@ public sealed class LaunchService
         return result;
     }
 
-    public LaunchCommand BuildCommand(ToolInfo tool, LaunchProfile profile)
+    /// <summary>PowerShell 宿主三级回退：PATH 上的 pwsh → PATH 上的 powershell → System32 全路径。</summary>
+    private static string ResolvePowerShellHost() =>
+        PathSearch.FindOnPath("pwsh")
+        ?? PathSearch.FindOnPath("powershell")
+        ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "powershell.exe");
+
+    /// <summary>分词结果 + AutoRestore 追加的 ResumeArgs（已含则不重复）——内嵌/外部双轨共用。</summary>
+    private static List<string> EffectiveArgs(ToolInfo tool, LaunchProfile profile)
     {
-        var ext = Path.GetExtension(tool.ExePath).ToLowerInvariant();
         var args = SplitArgs(profile.Args).ToList();
         var known = KnownTools.MatchByExeName(tool.ExePath);
         if (profile.AutoRestore && known?.ResumeArgs is { } resume && !args.Contains(resume))
             args.Add(resume);
+        return args;
+    }
+
+    /// <summary>含空白的参数重新加引号（避免重组命令行时裂成多个参数）。</summary>
+    private static string QuoteIfSpaced(string token) =>
+        token.Any(char.IsWhiteSpace) ? $"\"{token}\"" : token;
+
+    public LaunchCommand BuildCommand(ToolInfo tool, LaunchProfile profile)
+    {
+        var ext = Path.GetExtension(tool.ExePath).ToLowerInvariant();
+        var args = EffectiveArgs(tool, profile);
         return ext switch
         {
             ".exe" => new LaunchCommand(tool.ExePath, args),
@@ -2020,7 +2093,7 @@ public sealed class LaunchService
                 Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe"),
                 new[] { "/c", tool.ExePath }.Concat(args).ToList()),
             ".ps1" => new LaunchCommand(
-                PathSearch.FindOnPath("pwsh") ?? "powershell.exe",
+                ResolvePowerShellHost(),
                 new[] { "-File", tool.ExePath }.Concat(args).ToList()),
             _ => throw new NotSupportedException($"不支持的启动文件类型：{ext}"),
         };
@@ -2054,10 +2127,14 @@ public sealed class LaunchService
     public ProcessStartInfo BuildExternalStartInfo(ToolInfo tool, LaunchProfile profile)
     {
         Validate(tool, profile);
+        var ext = Path.GetExtension(tool.ExePath).ToLowerInvariant();
+        // 外部轨道：分词重组（AutoRestore 追加 ResumeArgs），含空白的参数重新引用；
+        // .ps1 由 PowerShell 宿主包装执行（CreateProcess 无法直接执行脚本，与内嵌轨道语义一致）。
+        var joined = string.Join(' ', EffectiveArgs(tool, profile).Select(QuoteIfSpaced));
         var psi = new ProcessStartInfo
         {
-            FileName = tool.ExePath,
-            Arguments = profile.Args,
+            FileName = ext == ".ps1" ? ResolvePowerShellHost() : tool.ExePath,
+            Arguments = ext == ".ps1" ? $"-File \"{tool.ExePath}\"{(joined.Length > 0 ? " " + joined : "")}" : joined,
             WorkingDirectory = ResolveWorkdir(profile),
             UseShellExecute = false,
         };
@@ -2077,13 +2154,27 @@ public sealed class LaunchService
 
 - [x] **步骤 3：运行测试验证通过**
 
-运行：`dotnet test --filter LaunchServiceTests` → 预期全部 Passed（含 4 条 InlineData）。
+运行：`dotnet test --filter LaunchServiceTests` → 预期全部 Passed（含 6 条 InlineData，共 20 条）。
 
 - [x] **步骤 4：Commit**
 
 ```bash
 git add src/ForgeDeck.Core tests/ForgeDeck.Core.Tests
 git commit -m "feat(core): 启动服务——校验/命令包装/env 展开/外部启动"
+```
+
+- [x] **步骤 5（审查修复追加）：ps1 外部启动宿主包装与双轨一致性**
+
+审查发现四项问题，按 TDD 修复（上方代码块已为修复后最终版）：
+
+1.（Important）`BuildExternalStartInfo` 对 `.ps1` 直接 FileName=ExePath，CreateProcess 无法执行（实测抛 Win32Exception）。修复：`.ps1` 外部启动由 PowerShell 宿主包装（`-File "脚本" 参数...`），宿主解析统一为三级回退 `ResolvePowerShellHost()`：PATH 上的 pwsh → PATH 上的 powershell → System32 全路径；`BuildCommand` 的 `.ps1` 分支同样改用三级回退（消除裸相对名 `powershell.exe`）。补真实进程集成测试：`LaunchExternal_Ps1Script_ExitsWithCode`（powershell -File 脚本 `exit 5`，验退出码）。
+2.（Minor）`LaunchExternal_CmdExitsWithCode` 改为真正调用 `_service.LaunchExternal(tool, profile)`。注：`Process.GetProcessById(pid)` 的 `ExitCode` 在 .NET 上抛 "Process was not started by this object"（组件不填充退出码），且 `Handle` 须在等待退出前取得（进程退出后重新 OpenProcess 失败）——测试经 `WaitForExitCode` helper（GetProcessById + 先取句柄 + P/Invoke `GetExitCodeProcess`）等退出验码。
+3.（Minor）AutoRestore 双轨一致：外部轨道 `Arguments` 改为 `SplitArgs` 分词（AutoRestore 追加 ResumeArgs）重组——含空白的参数经 `QuoteIfSpaced` 重新引用（否则 `"sonnet 4"` 裂成两个参数），空格 join。补断言：`BuildExternalStartInfo_ClaudeAutoRestore_AppendsResumeArgs`（Arguments == "--model x --continue"）。
+4.（Minor）补测试：`BuildCommand_UnsupportedExtension_Throws`（.py 抛 NotSupportedException）；SplitArgs 未闭合引号与空引号对两条 InlineData。
+
+```bash
+git add src/ForgeDeck.Core tests/ForgeDeck.Core.Tests docs/superpowers/plans
+git commit -m "fix(core): ps1 外部启动宿主包装与双轨一致性"
 ```
 
 ---
