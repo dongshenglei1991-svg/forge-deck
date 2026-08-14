@@ -586,6 +586,30 @@ public class ConfigStoreTests : IDisposable
         Assert.True(File.Exists(path + ".bak"));
         Assert.False(File.Exists(path + ".tmp"));
     }
+
+    [Fact]
+    public void Save_WritesCamelCaseContractForFrontend()
+    {
+        var path = PathFor("config.json");
+        var store = new ConfigStore(path);
+        store.Config.Profiles.Add(new LaunchProfile { ToolId = "t1", OpenMode = OpenMode.External });
+        store.Save();
+        var json = File.ReadAllText(path);
+        Assert.Contains("\"openMode\": \"external\"", json);
+        Assert.Contains("\"toolId\": \"t1\"", json);
+    }
+
+    [Fact]
+    public void Load_CorruptFile_BackupFails_StillReturnsDefaults()
+    {
+        var path = PathFor("config.json");
+        File.WriteAllText(path, "{ not json !!!");
+        Directory.CreateDirectory(path + ".bak"); // .bak 被目录占用 → File.Move 备份失败
+        var store = new ConfigStore(path);
+        store.Load();
+        Assert.Empty(store.Config.Tools);
+        Assert.True(File.Exists(path)); // 备份失败时保留原损坏文件，不崩溃
+    }
 }
 ```
 
@@ -711,7 +735,9 @@ public sealed class ConfigStore
         }
         catch (JsonException)
         {
-            File.Move(_path, _path + ".bak", overwrite: true);
+            try { File.Move(_path, _path + ".bak", overwrite: true); }
+            catch (IOException) { /* 备份失败：保留原文件，仍回退默认配置 */ }
+            catch (UnauthorizedAccessException) { /* Windows: .bak 被目录占用或不可写 */ }
             Config = new AppConfig();
         }
     }
@@ -729,7 +755,7 @@ public sealed class ConfigStore
 - [ ] **步骤 3：运行测试验证通过**
 
 运行：`dotnet test --filter ConfigStoreTests`
-预期：4 Passed。
+预期：6 Passed。
 
 - [ ] **步骤 4：Commit**
 

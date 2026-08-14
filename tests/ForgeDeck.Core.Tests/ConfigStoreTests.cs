@@ -63,4 +63,28 @@ public class ConfigStoreTests : IDisposable
         Assert.True(File.Exists(path + ".bak"));
         Assert.False(File.Exists(path + ".tmp"));
     }
+
+    [Fact]
+    public void Save_WritesCamelCaseContractForFrontend()
+    {
+        var path = PathFor("config.json");
+        var store = new ConfigStore(path);
+        store.Config.Profiles.Add(new LaunchProfile { ToolId = "t1", OpenMode = OpenMode.External });
+        store.Save();
+        var json = File.ReadAllText(path);
+        Assert.Contains("\"openMode\": \"external\"", json);
+        Assert.Contains("\"toolId\": \"t1\"", json);
+    }
+
+    [Fact]
+    public void Load_CorruptFile_BackupFails_StillReturnsDefaults()
+    {
+        var path = PathFor("config.json");
+        File.WriteAllText(path, "{ not json !!!");
+        Directory.CreateDirectory(path + ".bak"); // .bak 被目录占用 → File.Move 备份失败
+        var store = new ConfigStore(path);
+        store.Load();
+        Assert.Empty(store.Config.Tools);
+        Assert.True(File.Exists(path)); // 备份失败时保留原损坏文件，不崩溃
+    }
 }

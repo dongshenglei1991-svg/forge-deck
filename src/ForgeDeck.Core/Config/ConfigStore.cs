@@ -25,7 +25,9 @@ public sealed class ConfigStore
         }
         catch (JsonException)
         {
-            File.Move(_path, _path + ".bak", overwrite: true);
+            try { File.Move(_path, _path + ".bak", overwrite: true); }
+            catch (IOException) { /* 备份失败：保留原文件，仍回退默认配置 */ }
+            catch (UnauthorizedAccessException) { /* Windows: .bak 被目录占用或不可写 */ }
             Config = new AppConfig();
         }
     }
