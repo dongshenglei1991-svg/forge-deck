@@ -1,0 +1,17 @@
+# .NET
+bin/
+obj/
+*.user
+.vs/
+artifacts/
+
+# Node / Vite
+node_modules/
+ui/dist/
+
+# IDE
+.idea/
+*.swp
+
+# 本地运行产物
+*.log
