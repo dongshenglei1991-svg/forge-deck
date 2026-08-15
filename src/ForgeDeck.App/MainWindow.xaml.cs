@@ -39,6 +39,14 @@ public partial class MainWindow : Window
 
     private void OnWebReady(object? sender, CoreWebView2InitializationCompletedEventArgs e)
     {
+        if (!e.IsSuccess || Web.CoreWebView2 == null)
+        {
+            MessageBox.Show(
+                $"WebView2 初始化失败：{e.InitializationException?.Message ?? "未知原因"}\n请确认已安装 WebView2 运行时。",
+                "ForgeDeck", MessageBoxButton.OK, MessageBoxImage.Error);
+            Close();
+            return;
+        }
         var core = Web.CoreWebView2;
         core.WebMessageReceived += async (_, args) =>
         {
@@ -53,9 +61,21 @@ public partial class MainWindow : Window
 
     private void Post(string message)
     {
-        if (Web.CoreWebView2 == null) return;
-        if (Dispatcher.CheckAccess()) Web.CoreWebView2.PostWebMessageAsJson(message);
-        else Dispatcher.BeginInvoke(() => Web.CoreWebView2.PostWebMessageAsJson(message));
+        var core = Web.CoreWebView2;
+        if (core == null) return;
+        if (Dispatcher.CheckAccess())
+        {
+            try { core.PostWebMessageAsJson(message); }
+            catch (ObjectDisposedException) { }
+        }
+        else
+        {
+            Dispatcher.BeginInvoke(() =>
+            {
+                try { core.PostWebMessageAsJson(message); }
+                catch (ObjectDisposedException) { }
+            });
+        }
     }
 
     private void OnClosing(object? sender, CancelEventArgs e)
