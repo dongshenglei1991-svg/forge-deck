@@ -119,6 +119,7 @@ export default function App() {
     } catch (e: any) {
       console.error('保存配置失败', e);
       toast(e.message, 'error');
+      throw e; // rethrow 让 ConfigPanel 的 catch 兜住——失败时不闪"已保存"
     }
   }, [toast]);
 
