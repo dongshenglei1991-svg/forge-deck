@@ -36,6 +36,9 @@ public class TerminalSessionManagerTests : IDisposable
         var tcs = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
         void OnExit(string id, int code) { if (id == sessionId) tcs.TrySetResult(code); }
         mgr.Exited += OnExit;
+        // cmd /c 类短命进程：退出可能先于本方法订阅——订阅后先查快照补一次
+        var snapshot = mgr.List().FirstOrDefault(s => s.SessionId == sessionId);
+        if (snapshot is { Running: false }) tcs.TrySetResult(snapshot.ExitCode ?? -1);
         var winner = await Task.WhenAny(tcs.Task, Task.Delay(timeout));
         mgr.Exited -= OnExit;
         Assert.True(tcs.Task.IsCompleted, "超时未收到退出事件");
