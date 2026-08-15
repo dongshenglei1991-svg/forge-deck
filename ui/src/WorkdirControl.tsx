@@ -22,7 +22,7 @@ export function WorkdirControl({ value, recent, onChange, onBrowse }: {
     <div className="workdir-control" ref={ref}>
       <input className="input mono" id="workdir" value={value} onChange={(e) => onChange(e.target.value)} />
       <button className="workdir-btn" type="button" aria-label="打开最近工作目录"
-        aria-expanded={menuOpen} aria-controls="workdirMenu"
+        aria-expanded={menuOpen} aria-controls={menuOpen ? 'workdirMenu' : undefined}
         onClick={() => setMenuOpen((v) => !v)}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><path d="m6 9 6 6 6-6" /></svg>
       </button>

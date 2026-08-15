@@ -5,7 +5,7 @@ export function parseEnvText(text: string): Record<string, string> {
     if (!trimmed || trimmed.startsWith('#')) continue;
     const eq = trimmed.indexOf('=');
     if (eq <= 0) continue;
-    env[trimmed.slice(0, eq).trim()] = trimmed.slice(eq + 1);
+    env[trimmed.slice(0, eq).trim()] = trimmed.slice(eq + 1).trim();
   }
   return env;
 }

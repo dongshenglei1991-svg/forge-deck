@@ -37,18 +37,18 @@ public class StartMenuScanSource(IShellLinkResolver resolver) : IScanSource
 
     public IEnumerable<ScanHit> Scan(ScanContext context)
     {
-            foreach (var dir in MenuDirs)
+        foreach (var dir in MenuDirs)
+        {
+            if (!Directory.Exists(dir)) continue;
+            // IgnoreInaccessible：跳过 ACL 拒绝的不可访问子目录，避免整源报废（被源级隔离静默吞掉）；
+            // AttributesToSkip = 0 必须显式设置：默认 Hidden|System 会静默跳过隐藏属性的 .lnk，改变语义。
+            var eo = new EnumerationOptions
             {
-                if (!Directory.Exists(dir)) continue;
-                // IgnoreInaccessible：跳过 ACL 拒绝的不可访问子目录，避免整源报废（被源级隔离静默吞掉）；
-                // AttributesToSkip = 0 必须显式设置：默认 Hidden|System 会静默跳过隐藏属性的 .lnk，改变语义。
-                var eo = new EnumerationOptions
-                {
-                    RecurseSubdirectories = true,
-                    IgnoreInaccessible = true,
-                    AttributesToSkip = 0,
-                };
-                foreach (var lnk in Directory.EnumerateFiles(dir, "*.lnk", eo))
+                RecurseSubdirectories = true,
+                IgnoreInaccessible = true,
+                AttributesToSkip = 0,
+            };
+            foreach (var lnk in Directory.EnumerateFiles(dir, "*.lnk", eo))
             {
                 var target = resolver.ResolveTarget(lnk);
                 if (target == null || !File.Exists(target)) continue;

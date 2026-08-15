@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Switch } from './Switch';
 import { WorkdirControl } from './WorkdirControl';
 import { parseEnvText, stringifyEnv } from './lib/env';
@@ -9,7 +9,7 @@ const RESUMABLE = new Set(['Claude Code']);
 
 export function ConfigPanel({ tool, profile, workdirs, onSave, onLaunch, onBrowse }: {
   tool: ToolListItem; profile: LaunchProfile; workdirs: string[];
-  onSave: (p: LaunchProfile) => void; onLaunch: (p: LaunchProfile) => void;
+  onSave: (p: LaunchProfile) => void | Promise<void>; onLaunch: (p: LaunchProfile) => void;
   onBrowse: () => void;
 }) {
   const [args, setArgs] = useState(profile.args);
@@ -37,10 +37,17 @@ export function ConfigPanel({ tool, profile, workdirs, onSave, onLaunch, onBrows
   const current = (): LaunchProfile => ({
     ...profile, args, workdir, env: parseEnvText(envText), autoRestore, openMode,
   });
-  const save = () => {
-    onSave(current());
-    setSavedFlash(true);
-    setTimeout(() => setSavedFlash(false), 1400);
+  // 连续保存的 flash 令牌：只有最新一次保存的定时器可以熄灭提示，避免早先的 setTimeout 提前关掉后一次的"已保存"
+  const flashSeq = useRef(0);
+  const save = async () => {
+    try {
+      await onSave(current());
+      const seq = ++flashSeq.current;
+      setSavedFlash(true);
+      setTimeout(() => { if (flashSeq.current === seq) setSavedFlash(false); }, 1400);
+    } catch {
+      // 保存失败不闪成功；错误 toast 由 App 层 handleSaveProfile 弹出
+    }
   };
 
   return (

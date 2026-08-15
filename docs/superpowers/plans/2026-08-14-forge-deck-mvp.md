@@ -4655,7 +4655,7 @@ const handleSaveSettings = useCallback(async (settings: AppSettings) => {
 2. 沿用任务 12/14 替代方案：headless Edge（Edg/151）+ CDP 驱动 vite preview（MockBridge，127.0.0.1），逐项验证全过：
    - **工具库**：表头 5 列（工具/可执行文件/来源/默认方式/状态），mock 4 行渲染（Claude Code=内嵌终端、Cursor Agent=独立窗口、均"已安装"）；点"扫描本机工具"→ 视图切回 launcher 且扫描态触发（40ms 间隔采样：t=40–160ms "正在扫描…"、重新扫描按钮 disabled，t=200ms 起"自动扫描 · 已完成"）。
    - **会话**：初始空态文案"暂无会话。启动工具或新建空白会话后在此查看。"；新建空白会话 → 卡片出现（标题 pwsh/workdir/运行中），终端面板同步出标签；点标签 × → mock close **移除**会话（与真实后端 Close 语义一致），卡片消失、空态恢复；"已退出"渲染经临时桥补丁走 `terminal.kill`（running=false + exitCode=1）核对 → 卡片保留且显示"已退出 · 1"，验证后补丁已还原（见修正项 4）。
-   - **设置**：两卡（工具发现/终端偏好）+ 附加扫描目录文本域 + 三开关（启动时自动扫描=on/关闭应用时不弹会话确认=off/优先使用内嵌终端=on）+ 默认 Shell 输入渲染；改 defaultShell 为 `cmd`、填两行附加目录、关自动扫描 → 保存 → `settings.get` 回读 `defaultShell=cmd`、`autoScanOnStartup=false`、`extraScanDirs` 两行按 trim/去空行解析，且输入框/开关立即回显新值（SettingsView `[info]` effect 生效），未提交字段（maxWorkdirHistory 等）经 `...info.settings` 展开保留。
+   - **设置**：两卡（工具发现/终端偏好）+ 附加扫描目录文本域 + 三开关（启动时自动扫描=on/关闭应用时不弹会话确认=off/优先使用内嵌终端=on）+ 默认 Shell 输入渲染；改 defaultShell 为 `cmd`、填两行附加目录、关自动扫描 → 保存 → `settings.get` 回读 `defaultShell=cmd`、`autoScanOnStartup=false`、`extraScanDirs` 两行按 trim/去空行解析，且输入框/开关立即回显新值（SettingsView `[info]` effect 生效；**任务 16 补注（误归因修正）**：mock 的 `settings.save` 返回的是同一 `this.settings` 对象引用，React 同引用 bailout 下 `setSettingsInfo` 不触发重渲染、`[info]` effect 实际不会重跑——当时的"立即回显"来自表单本地草稿本身。该 effect 路径仅在真实桥下成立（每次响应均为新反序列化对象）），未提交字段（maxWorkdirHistory 等）经 `...info.settings` 展开保留。
    - **term-hidden 回归**：工具库与设置视图根节点均为 `app term-hidden`，会话视图为 `app`（按设计保留终端面板）。
    - **视觉对照**（设计稿 66-83 行）：三视图截图经视觉模型核对——eyebrow/title/sub/按钮文案、表格结构与 4 行数据、会话卡（标题+mono 路径+状态）、设置卡（文本域/输入框/三开关/右下 primary 保存按钮）均与设计稿一致；布局探针：三视图均无横向溢出，session-grid/settings-grid 实测两等宽列（478px×2），data-table 968px 贴合 970px 面板。
 3. mock 限制（注明）：`settings.save` 仅持久于内存，页面刷新即重置（刷新后实测 autoScan 回 true、defaultShell 回 pwsh），"关闭自动扫描 → 刷新后启动走 tools.list"与"附加扫描目录 → 重扫出现新工具（来源=附加目录）"两条依赖持久化/真实扫描器的链路无法在 mock 下验证，由后端单测（ConfigStore 持久化、扫描器 extraScanDirs 合并）覆盖，任务 16 真机验收时复核；mock 的 `terminal.createShell` 标题硬编码 pwsh，"改 cmd → 新会话标题变 cmd"同属真机项（真实桥读 `Settings.DefaultShell`）。
@@ -4673,9 +4673,9 @@ git commit -m "feat(ui): 工具库/终端会话/设置视图接入真实数据"
 
 **文件：**
 - 创建：`ui/src/Toast.tsx`
-- 修改：`ui/src/App.tsx`（toast 接线：启动失败、添加成功等）、`README.md`
+- 修改：`ui/src/App.tsx`（toast 接线）、`ui/src/TerminalPanel.tsx`（session-gone 静默判定）、`ui/src/app.css`、`ui/src/TopBar.tsx`、`ui/src/ConfigPanel.tsx`、`ui/src/AddToolModal.tsx`、`ui/src/lib/env.ts`、`ui/src/WorkdirControl.tsx`、`ui/src/SettingsView.tsx`、`src/ForgeDeck.Core/Scanning/StartMenuScanSource.cs`、`README.md`
 
-- [ ] **步骤 1：Toast 组件**
+- [x] **步骤 1：Toast 组件**（按计划实现，无偏差）
 
 `ui/src/Toast.tsx`：
 
@@ -4694,7 +4694,7 @@ export function Toast({ items }: { items: ToastItem[] }) {
 }
 ```
 
-- [ ] **步骤 2：App 接线**
+- [x] **步骤 2：App 接线**（按计划；偏差与补充：catch 分支保留 console.error 同时加 toast；`handleAddTool` 失败 toast 后 rethrow 由弹窗就地展示同一错误并复位提交态；启动 effect/useCallback 依赖数组补 `toast`）
 
 `ui/src/App.tsx`：
 
@@ -4707,35 +4707,53 @@ const toast = useCallback((text: string, kind: ToastItem['kind'] = 'info') => {
 }, []);
 ```
 
-把任务 13/14 中 `console.error` 的失败分支替换为 `toast(e.message, 'error')`（`handleLaunch`、`handleNewShell`、启动加载 catch、`handleAddTool` 在 AddToolModal 内已就地展示错误，无需 toast）；`handleSaveProfile`/`handleSaveSettings` 成功后 `toast('已保存')`；`handleAddTool` 成功后 `toast('已添加到工具库')`；独立窗口启动成功 `toast(\`已在独立窗口打开 ${tool.tool.name}\`)`。渲染 `<Toast items={toasts} />` 于根 div 末尾。
+错误路径：启动加载 catch、`handleRescan`/`handleNewShell`/`handleSaveSettings`/`handleLaunch`/`handleSaveProfile` 的 catch → `toast(e.message, 'error')`；`handleAddTool` 失败 → toast + rethrow（弹窗内就地展示）。成功 toast：`handleSaveProfile` → `'已保存'`、`handleSaveSettings` → `'设置已保存'`、`handleAddTool` → `'已添加到工具库'`、独立窗口启动 → `` `已在独立窗口打开 ${tool.tool.name}` ``。渲染 `<Toast items={toasts} />` 于根 div 末尾。
 
-- [ ] **步骤 3：验收清单（对照规格与设计稿逐项跑）**
+TerminalPanel 补充：write/resize 的 catch 收敛为 `ignoreSessionGone`——`session-gone` 前缀（关标签瞬间在途请求的良性竞态）静默，其余打 console.error（handleLaunch 的 embedded 分支无需特判，create 不会返回该码）。
 
-运行全量测试：`dotnet test` → 预期全部 Passed。
-构建发布产物：`cd ui && npm run build`，然后仓库根 `dotnet build`。
-以**非 dev 模式**启动 `dotnet run --project src/ForgeDeck.App` 逐项验证：
+- [x] **步骤 3：验收**
 
-1. 快速启动：自动扫描、三指标、工具列表与配置面板联动、手动添加（成功/失败路径）。
-2. 工作目录：历史下拉（最近 5）、文件夹选择弹窗（常用位置=真实目录+历史）、手输路径。
-3. 内嵌终端：启动工具进新标签、输入输出、resize、关标签、新建空白会话（默认 Shell 遵循设置）。
-4. 独立窗口：参数/环境变量/工作目录生效（用 `cmd /k set FOO=bar` 类命令验证 env）。
-5. 环境变量：`KEY=VALUE` 多行保存，启动的进程内 `set KEY` 可见。
-6. 自动恢复开关：Claude Code 开启后启动命令追加 `--continue`（终端回显可见）。
-7. 工具库/会话/设置三视图数据与行为。
-8. 退出确认：有运行会话时弹确认；设置开关后不弹。
-9. 视觉对照：并排打开 `docs/design/Web-Prototype/ai-tool-launcher.html` 与应用（1280×800），逐视图核对布局/配色/间距/交互动效（视图切换动画、弹窗进出场、focus-visible、开关动效）。
-10. 响应式：窗口缩到 920px 以下侧栏收窄为图标；560px 以下指标单列（WebView2 拖拽窗口宽度验证）。
+本机 WebView2 已知异常，WPF 宿主真机清单跳过，以「全量测试 + 构建产物 + 浏览器断言」替代执行：
 
-发现问题回改对应任务组件，全部通过后进入下一步。
+1. `dotnet test` → 76/76 Passed；`dotnet build --no-incremental` → 0 警告 0 错误；`cd ui && npm run build` → ✓ built；`npm run lint` → 0 warnings 0 errors。
+2. 构建产物：`ui/dist`（index.html + assets/index-*.js|css）完整复制入 ForgeDeck.App 输出 wwwroot。
+3. 浏览器验收（headless Edge + CDP + 伪 WebView2 桥注入：比 MockBridge 更强，可检查全部请求载荷并按方法注入错误响应），26 项断言 + 1 项专项全过：
+   - 启动成功/rescan 成功/内嵌启动成功 均无 toast（设计如此，成功 toast 仅四处：保存配置/保存设置/添加工具/独立窗口）。
+   - AddToolModal：无效提交就地展示（弹窗内、无桥请求、无 toast）；桥失败（注入）→ 一条错误 toast + 弹窗就地展示同一错误 + 提交态复位；添加成功 → toast 一次 + 载荷正确 + 列表 5 行。
+   - env 值 trim：`KEY = value` 载荷 `{KEY:'value'}`。
+   - 连续两次保存 flash 令牌化：第二次 flash 存活 >1.15s、~1.4s 熄灭（无令牌时会在 ~1.1s 被第一次的定时器误关）。
+   - 非法 shell（bash）→ 载荷 pwsh、输入框保留原文；` cmd ` → 载荷 cmd。
+   - term-hidden 视图 toast-wrap bottom=18px，常规视图 280px。
+   - 错误 toast（rescan/settings.save/app.info 断桥注入）：文案 `code: message`、红边 rgb(229,72,77)（--danger）、3.2s 自动消失（实测 3211ms）、console.error 保留。
+   - session-gone 在途写入静默（0 console.error），非 session-gone 写失败打 console.error。
+   - 通知装饰按钮 tabIndex=-1；workdir aria-controls 收起时不挂载、展开指向 workdirMenu。
+4. 真机保留项（WebView2 环境恢复后复核）：真实扫描/ConPTY 输入输出/独立窗口 env 生效（`cmd /k set FOO=bar`）/自动恢复 `--continue` 回显/退出确认/响应式拖拽。
 
-- [ ] **步骤 4：更新 README 并 Commit**
+- [x] **步骤 3.5：审查遗留清理**（任务 16 扩展，一次小提交）
 
-`README.md` 增加一节「功能现状」简述 MVP 已支持能力（扫描/配置/两种启动/工作目录历史/设置），保持简洁。
+1. `app.css` 末尾追加 `.app.term-hidden .toast-wrap{bottom:18px}`；`:root` 增 `--danger:#e5484d`，`.toast.error` 边色与 AddToolModal 内联错误色改引用令牌。
+2. `TopBar.tsx` 通知装饰按钮 `tabIndex={-1}`。
+3. `ConfigPanel.tsx` save 改 async：`await onSave(current())` 后走 flash（失败不闪，错误 toast 由 App 层弹）；flash 用 `flashSeq` ref 序号令牌，定时器回调校验令牌才熄灭。`onSave` prop 类型放宽为 `void | Promise<void>`。
+4. `lib/env.ts` parseEnvText 值侧 trim（key 侧不变）。
+5. `WorkdirControl.tsx` `aria-controls` 仅 menuOpen 时挂载。
+6. `SettingsView.tsx` shell 载荷校验：`['pwsh','powershell','cmd'].includes(shell.trim())` 否则回退 pwsh，输入框保留原文。
+7. `StartMenuScanSource.cs` Scan 方法 40-52 行区域缩进对齐修复（纯格式）。
+8. 任务 15 步骤 5 设置段补注 mock 同引用 bailout 误归因说明。
+9. `README.md` 增「功能现状」一节。
+
+- [x] **步骤 4：更新 README 并 Commit**（分两次提交）
 
 ```bash
-git add ui/src README.md
-git commit -m "feat(ui): 错误 Toast 与验收收尾"
+git add ui/src/Toast.tsx ui/src/App.tsx ui/src/TerminalPanel.tsx
+git commit -m "feat(ui): 错误 Toast 与成功反馈接线"
+git add ui/src/app.css ui/src/TopBar.tsx ui/src/ConfigPanel.tsx ui/src/AddToolModal.tsx \
+        ui/src/lib/env.ts ui/src/WorkdirControl.tsx ui/src/SettingsView.tsx \
+        src/ForgeDeck.Core/Scanning/StartMenuScanSource.cs README.md \
+        docs/superpowers/plans/2026-08-14-forge-deck-mvp.md
+git commit -m "chore: 审查遗留清理——toast 定位/令牌化/可访问性/格式与文档"
 ```
+
+（实际提交：第一笔 `3476062` feat(ui): 错误 Toast 与成功反馈接线；第二笔 chore: 审查遗留清理——toast 定位/令牌化/可访问性/格式与文档，即本计划文档所在的收尾提交，hash 见 git log。）
 
 ---
 

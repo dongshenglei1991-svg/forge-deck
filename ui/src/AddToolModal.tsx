@@ -35,7 +35,7 @@ export function AddToolModal({ open, onClose, onConfirm }: {
         <input className="input mono" id="newPath" placeholder="C:\\Program Files\\...\\tool.exe" value={path}
           onChange={(e) => setPath(e.target.value)} />
       </div>
-      {error && <p style={{ color: '#e5484d', fontSize: 12, margin: '0 0 8px' }}>{error}</p>}
+      {error && <p style={{ color: 'var(--danger)', fontSize: 12, margin: '0 0 8px' }}>{error}</p>}
       <div className="modal-foot">
         <button className="btn" onClick={onClose}>取消</button>
         <button className="btn primary" onClick={submit} disabled={submitting}>

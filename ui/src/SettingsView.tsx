@@ -17,9 +17,11 @@ export function SettingsView({ info, onSave }: { info: SettingsInfo; onSave: (s:
     setPreferEmbedded(info.settings.preferEmbedded);
   }, [info]);
 
+  // 载荷侧校验：非法 shell（如手输 bash）回退 pwsh；输入框保留用户原文，不就地改写
+  const shellValue = (['pwsh', 'powershell', 'cmd'].includes(shell.trim()) ? shell.trim() : 'pwsh') as AppSettings['defaultShell'];
   const save = () => onSave({
     ...info.settings,
-    defaultShell: (shell.trim() || 'pwsh') as AppSettings['defaultShell'],
+    defaultShell: shellValue,
     autoScanOnStartup: autoScan,
     extraScanDirs: extraDirs.split(/\r?\n/).map((s) => s.trim()).filter(Boolean),
     skipExitConfirm,
