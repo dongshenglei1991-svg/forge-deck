@@ -14,18 +14,15 @@ export default function App() {
   const termHidden = view === 'tools' || view === 'settings';
 
   const refreshSessions = useCallback(async () => {
-    setSessions(await bridge.request<TerminalSessionInfo[]>('sessions.list'));
+    const list = await bridge.request<TerminalSessionInfo[]>('sessions.list');
+    setSessions(list);
+    // 数据到达期一并校正激活：cur 仍有效则保留（新建标签的显式 set 不被旧列表回退），失效则选剩余首个，全关归 null
+    setActiveSessionId((cur) => (cur && list.some((s) => s.sessionId === cur) ? cur : list[0]?.sessionId ?? null));
   }, []);
 
   useEffect(() => { refreshSessions(); }, [refreshSessions]);
 
   useEffect(() => bridge.on('sessions.changed', () => { refreshSessions(); }), [refreshSessions]);
-
-  useEffect(() => {
-    // activeId 为空或已失效（如关闭了当前激活标签）时，自动选中第一个会话
-    if (sessions.length > 0 && !sessions.some((s) => s.sessionId === activeSessionId))
-      setActiveSessionId(sessions[0].sessionId);
-  }, [sessions, activeSessionId]);
 
   const handleNewShell = useCallback(async () => {
     try {

@@ -25,9 +25,16 @@ export function TerminalPanel({ sessions, activeId, onActivate, onNewSession, on
   const terms = useRef(new Map<string, { term: Terminal; fit: FitAddon }>());
   const containers = useRef(new Map<string, HTMLDivElement>());
   const observers = useRef(new Map<string, ResizeObserver>());
+  // 早到分块缓冲：createShell 响应→refreshSessions 往返→effect 建实例之间存在窗口，
+  // 此期间到达的 terminal.data 先缓存，实例创建后按序 flush，避免丢失首块输出。
+  const pendingChunks = useRef(new Map<string, string[]>());
 
   useEffect(() => bridge.on('terminal.data', ({ sessionId, chunk }: any) => {
-    terms.current.get(sessionId)?.term.write(chunk);
+    const entry = terms.current.get(sessionId);
+    if (entry) { entry.term.write(chunk); return; }
+    const buf = pendingChunks.current.get(sessionId);
+    if (buf) buf.push(chunk);
+    else pendingChunks.current.set(sessionId, [chunk]);
   }), []);
 
   useEffect(() => {
@@ -38,6 +45,7 @@ export function TerminalPanel({ sessions, activeId, onActivate, onNewSession, on
         observers.current.delete(id);
         terms.current.delete(id);
         containers.current.delete(id);
+        pendingChunks.current.delete(id);
       }
     for (const session of sessions) {
       const id = session.sessionId;
@@ -63,6 +71,11 @@ export function TerminalPanel({ sessions, activeId, onActivate, onNewSession, on
         bridge.request('terminal.resize', { sessionId: id, cols: term.cols, rows: term.rows }).catch(() => {});
       });
       observer.observe(container);
+      const buffered = pendingChunks.current.get(id);
+      if (buffered) {
+        for (const chunk of buffered) term.write(chunk);
+        pendingChunks.current.delete(id);
+      }
       terms.current.set(id, { term, fit });
       observers.current.set(id, observer);
     }

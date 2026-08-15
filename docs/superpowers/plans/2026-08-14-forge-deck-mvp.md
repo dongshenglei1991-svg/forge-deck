@@ -3498,11 +3498,11 @@ git commit -m "feat(app): WebView2 宿主——消息桥接线/开发模式导�
 
 **文件：**
 - 创建：`ui/src/TerminalPanel.tsx`
-- 修改：`ui/src/App.tsx`、`ui/src/bridge.ts`（Mock 修复一行）
+- 修改：`ui/src/App.tsx`、`ui/src/bridge.ts`（Mock 两处保真度修复）
 
 - [x] **步骤 1：TerminalPanel 组件**
 
-`ui/src/TerminalPanel.tsx`（最终实现；oklch 主题经 Chromium 151 家族真机渲染验证通过，保留 oklch，十六进制近似值留注释备用——xterm v6 默认 DOM 渲染器走 CSS 颜色，原生支持 oklch）：
+`ui/src/TerminalPanel.tsx`（最终实现；oklch 主题经 Chromium 151 家族真机渲染验证通过，保留 oklch，十六进制近似值留注释备用——xterm v6 默认 DOM 渲染器走 CSS 颜色，原生支持 oklch。含二审修复：早到分块缓冲 pendingChunks，createShell 响应→refreshSessions 往返→effect 建实例窗口期内到达的 terminal.data 先缓存、实例创建后按序 flush，避免快速输出工具丢首块）：
 
 ```tsx
 import { useEffect, useRef } from 'react';
@@ -3532,9 +3532,16 @@ export function TerminalPanel({ sessions, activeId, onActivate, onNewSession, on
   const terms = useRef(new Map<string, { term: Terminal; fit: FitAddon }>());
   const containers = useRef(new Map<string, HTMLDivElement>());
   const observers = useRef(new Map<string, ResizeObserver>());
+  // 早到分块缓冲：createShell 响应→refreshSessions 往返→effect 建实例之间存在窗口，
+  // 此期间到达的 terminal.data 先缓存，实例创建后按序 flush，避免丢失首块输出。
+  const pendingChunks = useRef(new Map<string, string[]>());
 
   useEffect(() => bridge.on('terminal.data', ({ sessionId, chunk }: any) => {
-    terms.current.get(sessionId)?.term.write(chunk);
+    const entry = terms.current.get(sessionId);
+    if (entry) { entry.term.write(chunk); return; }
+    const buf = pendingChunks.current.get(sessionId);
+    if (buf) buf.push(chunk);
+    else pendingChunks.current.set(sessionId, [chunk]);
   }), []);
 
   useEffect(() => {
@@ -3545,6 +3552,7 @@ export function TerminalPanel({ sessions, activeId, onActivate, onNewSession, on
         observers.current.delete(id);
         terms.current.delete(id);
         containers.current.delete(id);
+        pendingChunks.current.delete(id);
       }
     for (const session of sessions) {
       const id = session.sessionId;
@@ -3570,6 +3578,11 @@ export function TerminalPanel({ sessions, activeId, onActivate, onNewSession, on
         bridge.request('terminal.resize', { sessionId: id, cols: term.cols, rows: term.rows }).catch(() => {});
       });
       observer.observe(container);
+      const buffered = pendingChunks.current.get(id);
+      if (buffered) {
+        for (const chunk of buffered) term.write(chunk);
+        pendingChunks.current.delete(id);
+      }
       terms.current.set(id, { term, fit });
       observers.current.set(id, observer);
     }
@@ -3617,25 +3630,22 @@ import { TerminalPanel } from './TerminalPanel';
 import type { TerminalSessionInfo } from './types';
 ```
 
-组件体内新增状态与处理（最终实现；自动选中 effect 同时覆盖"activeId 为空"与"activeId 已失效（关闭了当前激活标签）"两种情况——后者为联调中发现的实际 bug 修复）：
+组件体内新增状态与处理（最终实现。注意：**不要**用独立的自动选中 effect——`handleNewShell` 的 `setActiveSessionId(newId)` 提交时 sessions 还是旧列表（refreshSessions 往返未完成），effect 会误判 newId 失效而回退到旧首标签，导致新建第 2+ 个标签不再自动激活。失效校正统一放在数据到达期，用函数式 setState 原子判定：初始选首个、关激活标签选剩余首个、全关归 null、新建保留显式 set）：
 
 ```tsx
 const [sessions, setSessions] = useState<TerminalSessionInfo[]>([]);
 const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
 
 const refreshSessions = useCallback(async () => {
-  setSessions(await bridge.request<TerminalSessionInfo[]>('sessions.list'));
+  const list = await bridge.request<TerminalSessionInfo[]>('sessions.list');
+  setSessions(list);
+  // 数据到达期一并校正激活：cur 仍有效则保留（新建标签的显式 set 不被旧列表回退），失效则选剩余首个，全关归 null
+  setActiveSessionId((cur) => (cur && list.some((s) => s.sessionId === cur) ? cur : list[0]?.sessionId ?? null));
 }, []);
 
 useEffect(() => { refreshSessions(); }, [refreshSessions]);
 
 useEffect(() => bridge.on('sessions.changed', () => { refreshSessions(); }), [refreshSessions]);
-
-useEffect(() => {
-  // activeId 为空或已失效（如关闭了当前激活标签）时，自动选中第一个会话
-  if (sessions.length > 0 && !sessions.some((s) => s.sessionId === activeSessionId))
-    setActiveSessionId(sessions[0].sessionId);
-}, [sessions, activeSessionId]);
 
 const handleNewShell = useCallback(async () => {
   try {
@@ -3660,15 +3670,18 @@ const handleCloseSession = useCallback(async (id: string) => {
   onActivate={setActiveSessionId} onNewSession={handleNewShell} onCloseSession={handleCloseSession} />
 ```
 
-附带修复（`ui/src/bridge.ts` MockBridge 一行）：`sessions.list` 原返回内部数组的同一引用，React `setSessions` 因引用相同跳过重渲染、`[sessions]` effect 依赖不触发（真实桥每次返回新 JSON 数组，不受影响）。改为 `return [...this.sessions]; // 真实桥每次返回新 JSON 数组；副本保证 React 依赖比较生效`。
+附带修复（`ui/src/bridge.ts` MockBridge 两处保真度问题）：
+1. `sessions.list` 原返回内部数组的同一引用，React `setSessions` 因引用相同跳过重渲染、`[sessions]` effect 依赖不触发（真实桥每次返回新 JSON 数组，不受影响）。改为 `return [...this.sessions]; // 真实桥每次返回新 JSON 数组；副本保证 React 依赖比较生效`。
+2. `mockOutput` 首块从 300ms 改为 0ms 立即发射：模拟真实 ConPTY 在 createShell 响应与 sessions 列表往返之前就开始输出，使浏览器调试能真实考验 TerminalPanel 的早到分块缓冲（`i === 0 ? 0 : 300`）。
 
 - [x] **步骤 3：构建与验证**
 
 1. `cd ui && npm run build` → `✓ built`（xterm 体积触发 >500kB chunk 提示，属预期告警）；`npm run lint` 0 警告 0 错误；`dotnet test` 76/76 绿。
 2. WebView2 真机联调在本机受阻（环境问题，非代码问题）：msedgewebview2 浏览器进程在任何用户态应用下都无法派生（独立 WinForms+WebView2 最小复现确认，`CreateCoreWebView2ControllerAsync` 永久挂起、零子进程；同机 SearchHost/GameViewer 等系统级 WebView2 实例正常；headless msedge 本身可运行）。已尝试：--proxy-server=direct（旁路系统代理 127.0.0.1:10808 对 localhost 的劫持）、vite 绑定 127.0.0.1（原仅 ::1）、WMI/计划任务脱离进程树启动，均无法绕过。后端 ConPTY 全链已由 76 个单测覆盖。
 3. 改用 headless Edge（Chromium 151 家族，与 WebView2 151 同引擎）+ CDP 驱动 vite dev server（MockBridge）完成 UI 真机验证：
-   - `+` 新建标签 → 出现 pwsh 标签（绿点/×/激活下划线），xterm 渲染 mock 输出两行，光标块可见；
-   - 再开第二个标签 → 切换激活态正确；点 × 关闭激活标签 → 自动重选第一个（见步骤 2 修复），标签与 term-body 实例销毁、无残留 DOM；
+   - 连点两次 `+` → 第二个标签立即且稳定保持激活（时序回归修复验证）；慢速开第三个同样自动激活；
+   - 两标签的 xterm 文本均完整含首行 mock 输出（0ms 首块早于实例创建，缓冲不丢数据验证）；
+   - 点 × 关闭激活标签 → 自动重选剩余首个，标签与 term-body 实例销毁、无残留 DOM；
    - 视口 754→900→1600 宽三档 → xterm 行宽随容器等比变化（fit 重排生效）；全部关闭 → 空态正常；
    - 全程 console 无 error、无未捕获异常；oklch 主题实际渲染为深绿黑底 + 浅绿白字，与设计稿协调，无黑块/默认色异常——**最终保留 oklch**。
    - pwsh 真实提示符/echo 回显路径未能在 WebView2 内直测（见 2），该链路由后端单测覆盖，待环境修复后补一次人工冒烟。
@@ -3677,6 +3690,8 @@ const handleCloseSession = useCallback(async (id: string) => {
 
 ```bash
 cd /c/workspace/ForgeDeck && git add ui/src && git commit -m "feat(ui): 内嵌终端面板——xterm 多会话/自适应尺寸/输入输出流"
+# 二审修复（激活时序回归 + 早到输出缓冲）：
+git commit -m "fix(ui): 会话激活时序回归与早到输出缓冲"
 ```
 
 ---

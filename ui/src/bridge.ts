@@ -163,7 +163,8 @@ class MockBridge implements Bridge {
 
   private mockOutput(id: string, title: string) {
     const lines = [`${title} · Mock 终端（浏览器预览）\r\n`, '在 WebView2 宿主中运行时连接真实 ConPTY。\r\n'];
-    lines.forEach((chunk, i) => setTimeout(() => this.emit('terminal.data', { sessionId: id, chunk }), 300 * (i + 1)));
+    // 首块 0ms 立即发射：模拟真实 ConPTY 在 createShell 响应与 sessions 列表往返之前就开始输出（考验早到缓冲）
+    lines.forEach((chunk, i) => setTimeout(() => this.emit('terminal.data', { sessionId: id, chunk }), i === 0 ? 0 : 300));
   }
 }
 
