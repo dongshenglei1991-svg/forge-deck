@@ -34,7 +34,35 @@ public partial class MainWindow : Window
         _bridge.Dispatcher.Outgoing += Post;
         Web.DefaultBackgroundColor = System.Drawing.Color.FromArgb(14, 18, 17);
         Web.CoreWebView2InitializationCompleted += OnWebReady;
+        Loaded += OnWindowLoaded;
         Closing += OnClosing;
+    }
+
+    // 部分环境下 WPF WebView2 控件的自动初始化（内部走控件自己的环境创建路径）会无限挂起，
+    // 表现为窗口白屏且无 msedgewebview2 子进程。改为手动创建环境再喂给控件，绕开该路径。
+    // AdditionalBrowserArguments：发布模式以 file:// 直载 wwwroot，ES module 脚本会被
+    // Chromium 按 CORS 拦截，需放开 file 页面对 file 资源的访问。
+    private async void OnWindowLoaded(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var udf = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "ForgeDeck", "WebView2");
+            var options = new CoreWebView2EnvironmentOptions
+            {
+                AdditionalBrowserArguments = "--allow-file-access-from-files",
+            };
+            var env = await CoreWebView2Environment.CreateAsync(null, udf, options);
+            await Web.EnsureCoreWebView2Async(env);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(
+                $"WebView2 初始化失败：{ex.Message}\n请确认已安装 WebView2 运行时。",
+                "ForgeDeck", MessageBoxButton.OK, MessageBoxImage.Error);
+            Close();
+        }
     }
 
     private void OnWebReady(object? sender, CoreWebView2InitializationCompletedEventArgs e)
