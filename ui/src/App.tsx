@@ -10,6 +10,7 @@ import { FolderPickerModal } from './FolderPickerModal';
 import { ToolsView } from './ToolsView';
 import { SessionsView } from './SessionsView';
 import { SettingsView } from './SettingsView';
+import { Toast, type ToastItem } from './Toast';
 import type { AppInfo, AppSettings, LaunchProfile, SettingsInfo, TerminalSessionInfo, ToolListItem } from './types';
 
 const VIEW_TITLES: Record<View, string> = { launcher: '快速启动', tools: '工具库', sessions: '终端会话', settings: '设置' };
@@ -27,6 +28,12 @@ export default function App() {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const toast = useCallback((text: string, kind: ToastItem['kind'] = 'info') => {
+    const item: ToastItem = { id: Date.now() + Math.random(), text, kind };
+    setToasts((prev) => [...prev, item]);
+    setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== item.id)), 3200);
+  }, []);
 
   const refreshSessions = useCallback(async () => {
     const list = await bridge.request<TerminalSessionInfo[]>('sessions.list');
@@ -75,32 +82,45 @@ export default function App() {
       await refreshWorkdirs();
       const preferred = list.find((t) => t.tool.id === info.lastUsed?.toolId) ?? list[0];
       if (preferred) await selectTool(preferred.tool.id);
-    })().catch((e) => console.error('启动加载失败', e));
+    })().catch((e: any) => { console.error('启动加载失败', e); toast(e.message, 'error'); });
     const off = bridge.on('sessions.changed', () => { refreshSessions(); });
     return () => { disposed = true; off(); };
-  }, [refreshSessions, refreshWorkdirs, selectTool]);
+  }, [refreshSessions, refreshWorkdirs, selectTool, toast]);
 
   const handleRescan = useCallback(async () => {
     setScanning(true);
     try {
       setTools(await bridge.request<ToolListItem[]>('tools.rescan'));
       setAppInfo(await bridge.request<AppInfo>('app.info'));
-    } catch (e) {
-      console.error('重新扫描失败', e); // Toast 在任务 16 接入
+    } catch (e: any) {
+      console.error('重新扫描失败', e);
+      toast(e.message, 'error');
     } finally { setScanning(false); }
-  }, []);
+  }, [toast]);
 
   const handleAddTool = useCallback(async (name: string, exePath: string) => {
-    const list = await bridge.request<ToolListItem[]>('tools.addManual', { name, exePath });
-    setTools(list);
-    setAddOpen(false);
-  }, []);
+    try {
+      const list = await bridge.request<ToolListItem[]>('tools.addManual', { name, exePath });
+      setTools(list);
+      setAddOpen(false);
+      toast('已添加到工具库');
+    } catch (e: any) {
+      toast(e.message, 'error');
+      throw e; // AddToolModal 内继续就地展示同一错误并复位提交态
+    }
+  }, [toast]);
 
   const handleSaveProfile = useCallback(async (p: LaunchProfile) => {
-    const saved = await bridge.request<LaunchProfile>('profiles.save', { profile: p });
-    // 同 selectTool 的竞态防护：保存响应晚于工具切换到达时（cur 已是其他工具）丢弃，避免覆盖新选中项
-    setProfile((cur) => (cur && cur.id === saved.id ? saved : cur));
-  }, []);
+    try {
+      const saved = await bridge.request<LaunchProfile>('profiles.save', { profile: p });
+      // 同 selectTool 的竞态防护：保存响应晚于工具切换到达时（cur 已是其他工具）丢弃，避免覆盖新选中项
+      setProfile((cur) => (cur && cur.id === saved.id ? saved : cur));
+      toast('已保存');
+    } catch (e: any) {
+      console.error('保存配置失败', e);
+      toast(e.message, 'error');
+    }
+  }, [toast]);
 
   const handleLaunch = useCallback(async (p: LaunchProfile) => {
     const tool = tools.find((t) => t.tool.id === p.toolId);
@@ -114,21 +134,26 @@ export default function App() {
         await refreshSessions();
       } else {
         await bridge.request('launch.external', { toolId: p.toolId, profileId: p.id });
+        toast(`已在独立窗口打开 ${tool.tool.name}`);
       }
       setAppInfo(await bridge.request<AppInfo>('app.info'));
       await refreshWorkdirs();
-    } catch (e) { console.error('启动失败', e); } // Toast 在任务 16 接入
-  }, [tools, refreshSessions, refreshWorkdirs]);
+    } catch (e: any) {
+      console.error('启动失败', e);
+      toast(e.message, 'error');
+    }
+  }, [tools, refreshSessions, refreshWorkdirs, toast]);
 
   const handleNewShell = useCallback(async () => {
     try {
       const { sessionId } = await bridge.request<{ sessionId: string }>('terminal.createShell', { cols: 120, rows: 30 });
       setActiveSessionId(sessionId);
       await refreshSessions();
-    } catch (e) {
-      console.error('新建会话失败', e); // Toast 在任务 16 接入
+    } catch (e: any) {
+      console.error('新建会话失败', e);
+      toast(e.message, 'error');
     }
-  }, [refreshSessions]);
+  }, [refreshSessions, toast]);
 
   const handleCloseSession = useCallback(async (id: string) => {
     await bridge.request('terminal.close', { sessionId: id }).catch(() => {});
@@ -138,10 +163,12 @@ export default function App() {
   const handleSaveSettings = useCallback(async (settings: AppSettings) => {
     try {
       setSettingsInfo(await bridge.request<SettingsInfo>('settings.save', { settings }));
-    } catch (e) {
-      console.error('保存设置失败', e); // Toast 在任务 16 接入
+      toast('设置已保存');
+    } catch (e: any) {
+      console.error('保存设置失败', e);
+      toast(e.message, 'error');
     }
-  }, []);
+  }, [toast]);
 
   const termHidden = view === 'tools' || view === 'settings';
   const selectedTool = tools.find((t) => t.tool.id === selectedToolId) ?? null;
@@ -190,6 +217,7 @@ export default function App() {
         workdirs={workdirs}
         onConfirm={(path) => { setProfile((p) => (p ? { ...p, workdir: path } : p)); setPickerOpen(false); }}
         onClose={() => setPickerOpen(false)} />
+      <Toast items={toasts} />
     </div>
   );
 }

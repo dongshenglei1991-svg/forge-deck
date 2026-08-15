@@ -15,6 +15,12 @@ const THEME = {
   selectionBackground: 'rgba(140, 255, 190, 0.25)',
 };
 
+// write/resize 的在途失败：session-gone 前缀（关标签瞬间的良性竞态，后端会话校验）静默忽略，其余打日志
+function ignoreSessionGone(e: unknown) {
+  const msg = e instanceof Error ? e.message : String(e);
+  if (!msg.startsWith('session-gone')) console.error(e);
+}
+
 export function TerminalPanel({ sessions, activeId, onActivate, onNewSession, onCloseSession }: {
   sessions: TerminalSessionInfo[];
   activeId: string | null;
@@ -61,14 +67,12 @@ export function TerminalPanel({ sessions, activeId, onActivate, onNewSession, on
       term.loadAddon(fit);
       term.open(container);
       try { fit.fit(); } catch { /* 容器尺寸为 0 时忽略 */ }
-      bridge.request('terminal.resize', { sessionId: id, cols: term.cols, rows: term.rows }).catch(() => {});
-      term.onData((data) => bridge.request('terminal.write', { sessionId: id, data }).catch(() => {
-        // session-gone：关标签瞬间的在途写入是良性竞态，静默忽略
-      }));
+      bridge.request('terminal.resize', { sessionId: id, cols: term.cols, rows: term.rows }).catch(ignoreSessionGone);
+      term.onData((data) => bridge.request('terminal.write', { sessionId: id, data }).catch(ignoreSessionGone));
       const observer = new ResizeObserver(() => {
         if (container.offsetParent === null) return;
         try { fit.fit(); } catch { return; }
-        bridge.request('terminal.resize', { sessionId: id, cols: term.cols, rows: term.rows }).catch(() => {});
+        bridge.request('terminal.resize', { sessionId: id, cols: term.cols, rows: term.rows }).catch(ignoreSessionGone);
       });
       observer.observe(container);
       const buffered = pendingChunks.current.get(id);
