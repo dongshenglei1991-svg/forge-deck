@@ -147,7 +147,7 @@ Schema（version 字段供后续迁移）：
 ### 4.5 Bridge — 消息桥（ForgeDeck.App）
 
 - `WebMessageReceived` 反序列化 → 按 method 分发到 Core 服务 → 结果回传 `PostWebMessageAsJson`。
-- `dialog.selectDirectory` 在 App 层实现（WPF `OpenFolderDialog`），属 UI 能力不下放 Core。
+- 工作目录选择使用应用内文件夹选择弹窗（§2 已定），不设原生对话框桥方法（实现时移除了初稿的 `dialog.selectDirectory`，与 §2 一致）。
 
 ## 5. 前端（ui）
 

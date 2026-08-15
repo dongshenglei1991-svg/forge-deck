@@ -4762,3 +4762,17 @@ git commit -m "chore: 审查遗留清理——toast 定位/令牌化/可访问�
 - **规格覆盖度**：§2 目标 1→任务 6/7（扫描）+13（手动添加）；目标 2→任务 14（配置面板）；目标 3→任务 9/12（内嵌终端）；目标 4→任务 8/14（独立窗口）；目标 5→任务 5/14（工作目录历史）；目标 6→任务 15（设置页）。§3 桥接方法→任务 10 全量注册（`dialog.selectDirectory` 已按规格更新移除，改应用内选择器）。§4.1 数据源→任务 6/7；§4.2 配置→任务 4/5；§4.3 启动包装→任务 8；§4.4 终端→任务 9；§4.5 桥→任务 10/11。§5 前端四视图+弹窗+Mock→任务 1/2/3/12/13/14/15。§6 流程→任务 13/14 启动主线；§7 错误→任务 10（错误封包）/11（退出确认）/16（Toast）+任务 4（损坏恢复）；§8 测试→各任务 TDD 步骤。无遗漏。
 - **占位符扫描**：无"待定/TODO"；任务 13 的 configPanel 占位是任务内的显式中间态，任务 14 替换为真实现，链路闭合。
 - **类型一致性**：`LaunchProfile.autoRestore`（任务 4 定义，8/10/14 使用）；`ScanHit(ExePath, Known, SourceLabel)`（任务 6 定义，7 使用）；`TerminalSessionInfo(SessionId, Title, Workdir, Running, ExitCode)`（任务 9 定义，10/12/15 使用）；前端 `ToolListItem{tool,exists,defaultMode}`（任务 2 定义，与任务 10 C# `ToolListItem(Tool, Exists, DefaultMode)` 序列化一致）；桥方法名前后端一致（`tools.*`/`profiles.*`/`settings.*`/`workdirs.*`/`sessions.list`/`terminal.*`/`app.info`/`launch.external`）。
+
+## 合并后跟进项（最终整体审查 2026-08-15）
+
+已随合并处理：规格 §4.5 原生对话框描述回写为应用内弹窗（M3）；csproj 显式 Version 0.1.0（M6）。
+
+遗留跟进（均有 toast/等价兜底，非功能缺失）：
+- I1：终端 spawn 失败按规格应为"标签内错误+重试按钮"，当前实现为错误 toast + 手动重点启动（App.tsx handleLaunch/handleNewShell catch）。
+- I2：启动校验错误（exe/workdir 不存在）无结构化字段定位与配置项跳转，当前 toast 文本已指明缺什么；LaunchService.Validate 抛 InvalidOperationException 归 internal 码，可改 BridgeException("validation")。
+- M1：terminal.exit 事件后端发射、前端零消费者（sessions.changed 等价覆盖）。
+- M2：配置损坏恢复为静默重建，规格要求 UI 提示。
+- M4：§4.1 的 iconSource/注册表"未识别"工具收录未实现（实现取 §4.2 单 source 字段 + 前端名字 logo）。
+- M5：ui/public/icons.svg 死资产可删。
+- M7：桥层薄封装方法（createShell/kill/close、tools.list、profiles.delete、workdirs.remove）无 BridgeTests 直接分发测试（Core 层有测）。
+- 真机保留项：本机 WebView2 运行时异常，WPF 宿主内真实 ConPTY 冒烟待环境修复后补做（窗口可开、桥有 76 单测覆盖）。
