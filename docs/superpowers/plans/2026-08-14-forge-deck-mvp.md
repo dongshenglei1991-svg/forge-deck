@@ -31,8 +31,9 @@ src/ForgeDeck.Core/
   Scanning/KnownTools.cs         内置已知工具目录
   Scanning/PathSearch.cs         PATH/目录探测工具
   Scanning/IScanSource.cs        扫描源接口与 ScanHit/ScanContext
-  Scanning/KnownDirsScanSource.cs 已知安装目录 + 附加目录扫描
+  Scanning/KnownDirsScanSource.cs 已知安装目录扫描
   Scanning/PathScanSource.cs     PATH 扫描
+  Scanning/ExtraDirsScanSource.cs 附加目录扫描（规格 §4.1 数据源 #6，最低优先级）
   Scanning/RegistryScanSource.cs 注册表卸载项扫描（含 IUninstallRegistry）
   Scanning/StartMenuScanSource.cs 开始菜单 .lnk 扫描（含 IShellLinkResolver）
   Scanning/ToolScanner.cs        聚合去重
@@ -399,7 +400,7 @@ const ICONS = {
 
 export function Rail({ view, onView, version }: { view: View; onView: (v: View) => void; version: string }) {
   const item = (v: View, label: string) => (
-    <button className={view === v ? 'active' : ''} aria-selected={view === v} onClick={() => onView(v)}>
+    <button className={view === v ? 'active' : ''} aria-current={view === v ? 'page' : undefined} onClick={() => onView(v)}>
       {ICONS[v]}<span>{label}</span>
     </button>
   );
@@ -410,13 +411,13 @@ export function Rail({ view, onView, version }: { view: View; onView: (v: View) 
         <div><strong>forge</strong><small>TOOL LAUNCHER</small></div>
       </div>
       <div className="nav-label">工作台</div>
-      <nav className="nav" aria-label="主导航">
+      <nav className="nav" aria-label="工作台">
         {item('launcher', '快速启动')}
         {item('tools', '工具库')}
         {item('sessions', '终端会话')}
       </nav>
       <div className="nav-label">系统</div>
-      <nav className="nav">{item('settings', '设置')}</nav>
+      <nav className="nav" aria-label="系统">{item('settings', '设置')}</nav>
       <div className="rail-foot">
         <span className="status-dot" />扫描服务正常<br />
         <span className="mono">{version || 'v0.1.0 · Windows'}</span>
@@ -586,6 +587,30 @@ public class ConfigStoreTests : IDisposable
         Assert.True(File.Exists(path + ".bak"));
         Assert.False(File.Exists(path + ".tmp"));
     }
+
+    [Fact]
+    public void Save_WritesCamelCaseContractForFrontend()
+    {
+        var path = PathFor("config.json");
+        var store = new ConfigStore(path);
+        store.Config.Profiles.Add(new LaunchProfile { ToolId = "t1", OpenMode = OpenMode.External });
+        store.Save();
+        var json = File.ReadAllText(path);
+        Assert.Contains("\"openMode\": \"external\"", json);
+        Assert.Contains("\"toolId\": \"t1\"", json);
+    }
+
+    [Fact]
+    public void Load_CorruptFile_BackupFails_StillReturnsDefaults()
+    {
+        var path = PathFor("config.json");
+        File.WriteAllText(path, "{ not json !!!");
+        Directory.CreateDirectory(path + ".bak"); // .bak 被目录占用 → File.Move 备份失败
+        var store = new ConfigStore(path);
+        store.Load();
+        Assert.Empty(store.Config.Tools);
+        Assert.True(File.Exists(path)); // 备份失败时保留原损坏文件，不崩溃
+    }
 }
 ```
 
@@ -711,7 +736,9 @@ public sealed class ConfigStore
         }
         catch (JsonException)
         {
-            File.Move(_path, _path + ".bak", overwrite: true);
+            try { File.Move(_path, _path + ".bak", overwrite: true); }
+            catch (IOException) { /* 备份失败：保留原文件，仍回退默认配置 */ }
+            catch (UnauthorizedAccessException) { /* Windows: .bak 被目录占用或不可写 */ }
             Config = new AppConfig();
         }
     }
@@ -729,7 +756,7 @@ public sealed class ConfigStore
 - [ ] **步骤 3：运行测试验证通过**
 
 运行：`dotnet test --filter ConfigStoreTests`
-预期：4 Passed。
+预期：6 Passed。
 
 - [ ] **步骤 4：Commit**
 
@@ -758,7 +785,7 @@ namespace ForgeDeck.Core.Tests;
 public class WorkdirHistoryTests : IDisposable
 {
     private readonly string _path = Path.Combine(Path.GetTempPath(), "forgedeck-tests", $"{Guid.NewGuid():N}.json");
-    private readonly ConfigStore _store = new();
+    private readonly ConfigStore _store;
 
     public WorkdirHistoryTests() { _store = new ConfigStore(_path); _store.Load(); }
     public void Dispose() { try { File.Delete(_path); } catch { } }
@@ -814,6 +841,69 @@ public class WorkdirHistoryTests : IDisposable
         service.Remove(@"D:\a");
         Assert.Equal(new[] { @"D:\b" }, service.List());
     }
+
+    [Fact]
+    public void Add_PathCaseDifference_Deduped_KeepsLatestForm()
+    {
+        var service = new WorkdirHistoryService(_store);
+        service.Add(@"D:\P");
+        service.Add(@"d:\p");
+        Assert.Equal(new[] { @"d:\p" }, service.List());
+    }
+
+    [Fact]
+    public void Remove_PathCaseDifference_DeletesEntry()
+    {
+        var service = new WorkdirHistoryService(_store);
+        service.Add(@"D:\Projects");
+        service.Remove(@"d:\projects");
+        Assert.Empty(service.List());
+    }
+
+    [Fact]
+    public void Add_TrimsSurroundingWhitespace()
+    {
+        var service = new WorkdirHistoryService(_store);
+        service.Add("  D:\\a  ");
+        Assert.Equal(new[] { @"D:\a" }, service.List());
+    }
+
+    [Fact]
+    public void Add_MaxHistoryZero_ClampsToOne()
+    {
+        _store.Config.Settings.MaxWorkdirHistory = 0;
+        var service = new WorkdirHistoryService(_store);
+        service.Add(@"D:\only");
+        Assert.Equal(new[] { @"D:\only" }, service.List());
+    }
+
+    [Fact]
+    public void Add_NullPath_Ignored_NoThrow()
+    {
+        var service = new WorkdirHistoryService(_store);
+        service.Add(null!);
+        Assert.Empty(service.List());
+    }
+
+    [Fact]
+    public void List_ReturnsSnapshot_MutationDoesNotLeakIntoStore()
+    {
+        var service = new WorkdirHistoryService(_store);
+        service.Add(@"D:\a");
+        ((List<string>)service.List()).Add(@"D:\evil");
+        Assert.Single(service.List());
+    }
+
+    [Fact]
+    public void NullHistoryValue_ListAddRemove_AllSafe()
+    {
+        _store.Config.WorkdirHistory[WorkdirHistoryService.GlobalKey] = null!;
+        var service = new WorkdirHistoryService(_store);
+        Assert.Empty(service.List());
+        service.Remove(@"D:\ghost"); // 不应抛异常
+        service.Add(@"D:\a");        // 重建列表
+        Assert.Equal(new[] { @"D:\a" }, service.List());
+    }
 }
 ```
 
@@ -826,8 +916,6 @@ public class WorkdirHistoryTests : IDisposable
 `src/ForgeDeck.Core/Config/WorkdirHistoryService.cs`：
 
 ```csharp
-using ForgeDeck.Core;
-
 namespace ForgeDeck.Core.Config;
 
 public sealed class WorkdirHistoryService(ConfigStore store)
@@ -835,16 +923,16 @@ public sealed class WorkdirHistoryService(ConfigStore store)
     public const string GlobalKey = "__global__";
 
     public IReadOnlyList<string> List() =>
-        store.Config.WorkdirHistory.TryGetValue(GlobalKey, out var list)
-            ? list
+        store.Config.WorkdirHistory.TryGetValue(GlobalKey, out var list) && list is not null
+            ? list.ToList()
             : Array.Empty<string>();
 
     public void Add(string path)
     {
+        if (string.IsNullOrWhiteSpace(path)) return;
         path = path.Trim();
-        if (path.Length == 0) return;
         var list = Ensure();
-        list.Remove(path);
+        list.RemoveAll(x => string.Equals(x, path, StringComparison.OrdinalIgnoreCase));
         list.Insert(0, path);
         var max = Math.Max(1, store.Config.Settings.MaxWorkdirHistory);
         if (list.Count > max) list.RemoveRange(max, list.Count - max);
@@ -853,13 +941,15 @@ public sealed class WorkdirHistoryService(ConfigStore store)
 
     public void Remove(string path)
     {
-        if (store.Config.WorkdirHistory.TryGetValue(GlobalKey, out var list) && list.Remove(path.Trim()))
+        if (string.IsNullOrWhiteSpace(path)) return;
+        if (store.Config.WorkdirHistory.TryGetValue(GlobalKey, out var list) && list is not null
+            && list.RemoveAll(x => string.Equals(x, path.Trim(), StringComparison.OrdinalIgnoreCase)) > 0)
             store.Save();
     }
 
     private List<string> Ensure()
     {
-        if (!store.Config.WorkdirHistory.TryGetValue(GlobalKey, out var list))
+        if (!store.Config.WorkdirHistory.TryGetValue(GlobalKey, out var list) || list is null)
         {
             list = new List<string>();
             store.Config.WorkdirHistory[GlobalKey] = list;
@@ -871,7 +961,7 @@ public sealed class WorkdirHistoryService(ConfigStore store)
 
 - [ ] **步骤 3：运行测试验证通过**
 
-运行：`dotnet test --filter WorkdirHistoryTests` → 预期 6 Passed。
+运行：`dotnet test --filter WorkdirHistoryTests` → 预期 13 Passed。
 
 - [ ] **步骤 4：Commit**
 
@@ -885,7 +975,7 @@ git commit -m "feat(core): 全局工作目录历史（MRU/去重/上限）"
 ## 任务 6：已知工具目录、PATH 探测与扫描器骨架（TDD）
 
 **文件：**
-- 创建：`src/ForgeDeck.Core/Scanning/KnownTools.cs`、`src/ForgeDeck.Core/Scanning/PathSearch.cs`、`src/ForgeDeck.Core/Scanning/IScanSource.cs`、`src/ForgeDeck.Core/Scanning/KnownDirsScanSource.cs`、`src/ForgeDeck.Core/Scanning/PathScanSource.cs`、`src/ForgeDeck.Core/Scanning/ToolScanner.cs`
+- 创建：`src/ForgeDeck.Core/Scanning/KnownTools.cs`、`src/ForgeDeck.Core/Scanning/PathSearch.cs`、`src/ForgeDeck.Core/Scanning/IScanSource.cs`、`src/ForgeDeck.Core/Scanning/KnownDirsScanSource.cs`、`src/ForgeDeck.Core/Scanning/PathScanSource.cs`、`src/ForgeDeck.Core/Scanning/ExtraDirsScanSource.cs`、`src/ForgeDeck.Core/Scanning/ToolScanner.cs`
 - 测试：`tests/ForgeDeck.Core.Tests/ToolScannerTests.cs`
 
 - [ ] **步骤 1：编写失败的测试**
@@ -916,6 +1006,11 @@ public class ToolScannerTests : IDisposable
     private sealed class FakeSource(params ScanHit[] hits) : IScanSource
     {
         public IEnumerable<ScanHit> Scan(ScanContext context) => hits;
+    }
+
+    private sealed class ThrowingSource : IScanSource
+    {
+        public IEnumerable<ScanHit> Scan(ScanContext context) => throw new InvalidOperationException("源爆炸");
     }
 
     private static readonly KnownTool Claude =
@@ -978,36 +1073,129 @@ public class ToolScannerTests : IDisposable
     }
 
     [Fact]
-    public void KnownDirs_FindsToolInHintDir()
+    public void Scan_ContinuesWhenSourceThrows()
     {
-        var npmDir = Path.Combine(_dir, "npm");
-        Directory.CreateDirectory(npmDir);
-        File.WriteAllText(Path.Combine(npmDir, "claude.cmd"), "");
-        Environment.SetEnvironmentVariable("FD_TEST_NPM", npmDir);
+        var claude = FakeExe("claude.cmd");
+        var scanner = new ToolScanner(new IScanSource[]
+        {
+            new ThrowingSource(),
+            new FakeSource(new ScanHit(claude, Claude, "PATH")),
+        });
+        var tools = scanner.Scan(new ScanContext(Array.Empty<string>()));
+        var tool = Assert.Single(tools);
+        Assert.Equal("Claude Code", tool.Name);
+        Assert.Equal("PATH", tool.Source);
+    }
+
+    [Fact]
+    public void Probe_PrefersExtensionOverBareName()
+    {
+        var dir = Path.Combine(_dir, "shim");
+        Directory.CreateDirectory(dir);
+        File.WriteAllText(Path.Combine(dir, "claude"), "");      // npm sh shim（无扩展名）
+        File.WriteAllText(Path.Combine(dir, "claude.cmd"), "");
+        var first = PathSearch.Probe(dir, "claude").First();
+        Assert.EndsWith("claude.cmd", first);
+    }
+
+    [Fact]
+    public void FindOnPath_PrefersCmdOverBareShim()
+    {
+        var dir = Path.Combine(_dir, "onpath");
+        Directory.CreateDirectory(dir);
+        File.WriteAllText(Path.Combine(dir, "claude"), "");
+        File.WriteAllText(Path.Combine(dir, "claude.cmd"), "");
+        var original = Environment.GetEnvironmentVariable("PATH");
+        Environment.SetEnvironmentVariable("PATH", dir);
         try
         {
-            var source = new KnownDirsScanSource();
-            var hits = source.Scan(new ScanContext(Array.Empty<string>()))
-                .Where(h => h.Known?.Name == "Claude Code");
-            // KnownTools 用 %APPDATA%\npm 提示；通过子类注入测试提示目录
+            var found = PathSearch.FindOnPath("claude");
+            Assert.NotNull(found);
+            Assert.EndsWith("claude.cmd", found);
+        }
+        finally { Environment.SetEnvironmentVariable("PATH", original); }
+    }
+
+    [Fact]
+    public void PathScanSource_FindsKnownTool_PrefersCmdOverBareShim()
+    {
+        var dir = Path.Combine(_dir, "onpath2");
+        Directory.CreateDirectory(dir);
+        File.WriteAllText(Path.Combine(dir, "claude"), "");
+        File.WriteAllText(Path.Combine(dir, "claude.cmd"), "");
+        var original = Environment.GetEnvironmentVariable("PATH");
+        Environment.SetEnvironmentVariable("PATH", dir);
+        try
+        {
+            var hit = Assert.Single(new PathScanSource().Scan(new ScanContext(Array.Empty<string>())));
+            Assert.Equal("Claude Code", hit.Known!.Name);
+            Assert.Equal("PATH", hit.SourceLabel);
+            Assert.EndsWith("claude.cmd", hit.ExePath);
+        }
+        finally { Environment.SetEnvironmentVariable("PATH", original); }
+    }
+
+    [Fact]
+    public void MatchByName_PrefersLongerName()
+    {
+        var tool = KnownTools.MatchByName("Cursor Agent");
+        Assert.NotNull(tool);
+        Assert.Equal("Cursor Agent", tool.Name);
+    }
+
+    [Fact]
+    public void KnownDirs_FindsToolInHintDir()
+    {
+        var hintDir = Path.Combine(_dir, "npm");
+        Directory.CreateDirectory(hintDir);
+        File.WriteAllText(Path.Combine(hintDir, "claude.cmd"), "");
+
+        Environment.SetEnvironmentVariable("FD_TEST_NPM", hintDir);
+        try
+        {
             var testTool = new KnownTool("Claude Code", ToolType.Cli, "C/", null,
                 new[] { "claude" }, new[] { new InstallHint("%FD_TEST_NPM%", "npm 全局") });
-            var testSource = new KnownDirsScanSourceForTest(testTool);
-            var hit = Assert.Single(testSource.Scan(new ScanContext(Array.Empty<string>())));
-            Assert.Equal("npm 全局", hit.SourceLabel);
-            Assert.EndsWith("claude.cmd", hit.ExePath);
+            var codexTool = new KnownTool("Codex CLI", ToolType.Cli, "CX", null,
+                new[] { "codex" }, Array.Empty<InstallHint>());
+            var source = new KnownDirsScanSourceForTest(new[] { testTool, codexTool });
+
+            // Codex 无 hint 不命中；Claude 命中 hint 目录
+            var claudeHit = Assert.Single(source.Scan(new ScanContext(Array.Empty<string>())));
+            Assert.Equal("npm 全局", claudeHit.SourceLabel);
+            Assert.EndsWith("claude.cmd", claudeHit.ExePath);
         }
         finally { Environment.SetEnvironmentVariable("FD_TEST_NPM", null); }
     }
+
+    [Fact]
+    public void ExtraDirs_FindsToolWithoutHint()
+    {
+        var extraDir = Path.Combine(_dir, "extra");
+        Directory.CreateDirectory(extraDir);
+        File.WriteAllText(Path.Combine(extraDir, "codex.exe"), "");
+
+        var testTool = new KnownTool("Claude Code", ToolType.Cli, "C/", null,
+            new[] { "claude" }, new[] { new InstallHint("%FD_TEST_NPM_MISSING%", "npm 全局") });
+        var codexTool = new KnownTool("Codex CLI", ToolType.Cli, "CX", null,
+            new[] { "codex" }, Array.Empty<InstallHint>());
+        var source = new ExtraDirsScanSourceForTest(new[] { testTool, codexTool });
+
+        // Claude 的 hint 目录不存在且附加目录里没有 claude；Codex 由附加目录兜底命中
+        var hit = Assert.Single(source.Scan(new ScanContext(new[] { extraDir })));
+        Assert.Equal("Codex CLI", hit.Known!.Name);
+        Assert.Equal("附加目录", hit.SourceLabel);
+        Assert.EndsWith("codex.exe", hit.ExePath);
+    }
 }
-```
 
-上面第 5 个测试用到的测试子类与受控构造（把 KnownTools.All 换成单工具）放在同一测试文件：
-
-```csharp
-file sealed class KnownDirsScanSourceForTest(KnownTool tool) : KnownDirsScanSource
+file sealed class KnownDirsScanSourceForTest(KnownTool[] tools) : KnownDirsScanSource
 {
-    protected override IEnumerable<KnownTool> Catalog { get { yield return tool; } }
+    protected override IEnumerable<KnownTool> Catalog => tools;
+}
+
+file sealed class ExtraDirsScanSourceForTest(KnownTool[] tools) : ExtraDirsScanSource
+{
+    protected override IEnumerable<KnownTool> Catalog => tools;
 }
 ```
 
@@ -1089,7 +1277,9 @@ public static class KnownTools
     }
 
     public static KnownTool? MatchByName(string displayName) =>
-        All.FirstOrDefault(t => displayName.Contains(t.Name, StringComparison.OrdinalIgnoreCase));
+        All.Where(t => displayName.Contains(t.Name, StringComparison.OrdinalIgnoreCase))
+          .OrderByDescending(t => t.Name.Length)
+          .FirstOrDefault();
 }
 ```
 
@@ -1105,13 +1295,15 @@ public static class PathSearch
     public static IEnumerable<string> Probe(string dir, string name, string[]? extensions = null)
     {
         extensions ??= CliExtensions;
-        var direct = Path.Combine(dir, name);
-        if (File.Exists(direct)) yield return direct;
+        // 先按扩展名探测（.exe/.cmd/.bat/.ps1），最后才尝试无扩展名直命中——
+        // 避免 npm 全局目录的 sh shim（无扩展名）抢先命中导致启动失败。
         foreach (var ext in extensions)
         {
             var withExt = Path.Combine(dir, name + ext);
             if (File.Exists(withExt)) yield return withExt;
         }
+        var direct = Path.Combine(dir, name);
+        if (File.Exists(direct)) yield return direct;
     }
 
     public static IEnumerable<string> Probe(string dir, IEnumerable<string> names, string[]? extensions = null)
@@ -1135,7 +1327,7 @@ public static class PathSearch
 }
 ```
 
-`src/ForgeDeck.Core/Scanning/KnownDirsScanSource.cs`（`Catalog` 虚属性供测试替换）：
+`src/ForgeDeck.Core/Scanning/KnownDirsScanSource.cs`（`Catalog` 虚属性供测试替换；只探测 hint 目录，附加目录已拆至 `ExtraDirsScanSource`——附加目录是规格 §4.1 的最低优先级数据源 #6，优先级由组合根注入顺序保证）：
 
 ```csharp
 namespace ForgeDeck.Core.Scanning;
@@ -1148,7 +1340,7 @@ public class KnownDirsScanSource : IScanSource
     {
         foreach (var tool in Catalog)
         {
-            var hit = FindInHints(tool) ?? FindInExtraDirs(tool, context.ExtraDirs);
+            var hit = FindInHints(tool);
             if (hit != null) yield return hit;
         }
     }
@@ -1163,6 +1355,26 @@ public class KnownDirsScanSource : IScanSource
             if (path != null) return new ScanHit(Path.GetFullPath(path), tool, hint.Label);
         }
         return null;
+    }
+}
+```
+
+`src/ForgeDeck.Core/Scanning/ExtraDirsScanSource.cs`（附加目录独立扫描源，标签"附加目录"，组合根中排在最后）：
+
+```csharp
+namespace ForgeDeck.Core.Scanning;
+
+public class ExtraDirsScanSource : IScanSource
+{
+    protected virtual IEnumerable<KnownTool> Catalog => KnownTools.All;
+
+    public IEnumerable<ScanHit> Scan(ScanContext context)
+    {
+        foreach (var tool in Catalog)
+        {
+            var hit = FindInExtraDirs(tool, context.ExtraDirs);
+            if (hit != null) yield return hit;
+        }
     }
 
     private static ScanHit? FindInExtraDirs(KnownTool tool, IReadOnlyList<string> extraDirs)
@@ -1214,6 +1426,7 @@ public sealed class ToolScanner
 {
     private readonly IEnumerable<IScanSource> _sources;
 
+    /// <summary>sources 枚举顺序即优先级，先命中者胜（组合根注入顺序：KnownDirs→Path→Registry→StartMenu→ExtraDirs）。</summary>
     public ToolScanner(IEnumerable<IScanSource> sources) => _sources = sources;
 
     public List<ToolInfo> Scan(ScanContext context)
@@ -1221,7 +1434,19 @@ public sealed class ToolScanner
         var byPath = new Dictionary<string, ToolInfo>(StringComparer.OrdinalIgnoreCase);
         var seenNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var source in _sources)
-            foreach (var hit in source.Scan(context))
+        {
+            List<ScanHit> hits;
+            try
+            {
+                // 立即枚举，使源在枚举期间抛出的异常也纳入隔离范围（规格 §7）
+                hits = source.Scan(context).ToList();
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[ForgeDeck] 扫描源 {source.GetType().Name} 失败，已跳过：{ex.Message}");
+                continue;
+            }
+            foreach (var hit in hits)
             {
                 if (!File.Exists(hit.ExePath)) continue;
                 var path = Path.GetFullPath(hit.ExePath);
@@ -1237,6 +1462,7 @@ public sealed class ToolScanner
                     Builtin = hit.Known != null,
                 };
             }
+        }
         return byPath.Values
             .OrderByDescending(t => t.Builtin)
             .ThenBy(t => t.Name, StringComparer.OrdinalIgnoreCase)
@@ -1247,7 +1473,7 @@ public sealed class ToolScanner
 
 - [ ] **步骤 3：运行测试验证通过**
 
-运行：`dotnet test --filter ToolScannerTests` → 预期 5 Passed。
+运行：`dotnet test --filter ToolScannerTests` → 预期 11 Passed。
 
 - [ ] **步骤 4：Commit**
 
@@ -1263,8 +1489,9 @@ git commit -m "feat(core): 已知工具目录、PATH/目录探测与扫描聚合
 **文件：**
 - 创建：`src/ForgeDeck.Core/Scanning/RegistryScanSource.cs`、`src/ForgeDeck.Core/Scanning/StartMenuScanSource.cs`
 - 测试：`tests/ForgeDeck.Core.Tests/RegistryAndStartMenuTests.cs`
+- 修改：`tests/ForgeDeck.Core.Tests/ToolScannerTests.cs`（一个小改进，见步骤 5）
 
-- [ ] **步骤 1：编写失败的测试**
+- [x] **步骤 1：编写失败的测试**
 
 `tests/ForgeDeck.Core.Tests/RegistryAndStartMenuTests.cs`：
 
@@ -1307,6 +1534,44 @@ public class RegistryAndStartMenuTests : IDisposable
     }
 
     [Fact]
+    public void RegistrySource_FallsBackToInstallLocation_WhenIconNotExecutable()
+    {
+        var exe = Path.Combine(_dir, "Cursor.exe");
+        File.WriteAllText(exe, "");
+        var ico = Path.Combine(_dir, "cursor.ico");
+        File.WriteAllText(ico, "");
+        using (var key = Registry.CurrentUser.CreateSubKey($@"{TestUninstallKey}\CursorIco"))
+        {
+            key.SetValue("DisplayName", "Cursor Editor");
+            key.SetValue("InstallLocation", _dir);
+            key.SetValue("DisplayIcon", ico);   // 指向 .ico：存在但非可执行 → 回落 InstallLocation
+        }
+
+        var source = new RegistryScanSource(new RegistryUninstallRegistry(new[] { TestUninstallKey }));
+        var hit = Assert.Single(source.Scan(new ScanContext(Array.Empty<string>())));
+        Assert.Equal("Cursor", hit.Known!.Name);
+        Assert.Equal("注册表", hit.SourceLabel);
+        Assert.Equal(Path.GetFullPath(exe), hit.ExePath);
+    }
+
+    [Fact]
+    public void RegistrySource_ToleratesNonStringRegistryValues()
+    {
+        var exe = Path.Combine(_dir, "Cursor.exe");
+        File.WriteAllText(exe, "");
+        using (var key = Registry.CurrentUser.CreateSubKey($@"{TestUninstallKey}\CursorBadIcon"))
+        {
+            key.SetValue("DisplayName", "Cursor Editor");
+            key.SetValue("InstallLocation", _dir);
+            key.SetValue("DisplayIcon", 5, RegistryValueKind.DWord);   // 畸形 REG_DWORD：不应抛 InvalidCastException
+        }
+
+        var source = new RegistryScanSource(new RegistryUninstallRegistry(new[] { TestUninstallKey }));
+        var hit = Assert.Single(source.Scan(new ScanContext(Array.Empty<string>())));
+        Assert.Equal(Path.GetFullPath(exe), hit.ExePath);
+    }
+
+    [Fact]
     public void RegistrySource_SkipsUnrelatedEntries()
     {
         using (var key = Registry.CurrentUser.CreateSubKey($@"{TestUninstallKey}\RandomApp"))
@@ -1331,10 +1596,10 @@ public class RegistryAndStartMenuTests : IDisposable
         var resolver = new WScriptShellLinkResolver();
         Assert.Equal(exe, resolver.ResolveTarget(lnkPath));
 
-        // 目录级验证：把 .lnk 放进伪造的开始菜单目录
         var menuDir = Path.Combine(_dir, "StartMenu");
-        Directory.CreateDirectory(menuDir);
-        var lnk2 = Path.Combine(menuDir, "Claude2.lnk");
+        var subDir = Path.Combine(menuDir, "Sub");   // 子目录：覆盖递归枚举路径
+        Directory.CreateDirectory(subDir);
+        var lnk2 = Path.Combine(subDir, "Claude2.lnk");
         dynamic sc2 = shell.CreateShortcut(lnk2);
         sc2.TargetPath = exe;
         sc2.Save();
@@ -1354,7 +1619,7 @@ file sealed class StartMenuScanSourceForTest(IShellLinkResolver resolver, string
 
 运行：`dotnet test --filter RegistryAndStartMenuTests` → 预期编译失败。
 
-- [ ] **步骤 2：实现两个扫描源**
+- [x] **步骤 2：实现两个扫描源**
 
 `src/ForgeDeck.Core/Scanning/RegistryScanSource.cs`：
 
@@ -1395,9 +1660,9 @@ public sealed class RegistryUninstallRegistry : IUninstallRegistry
                     using var item = key.OpenSubKey(sub);
                     if (item == null) continue;
                     yield return new RegistryEntry(
-                        (string?)item.GetValue("DisplayName") ?? "",
-                        (string?)item.GetValue("InstallLocation") ?? "",
-                        (string?)item.GetValue("DisplayIcon") ?? "");
+                        item.GetValue("DisplayName") as string ?? "",
+                        item.GetValue("InstallLocation") as string ?? "",
+                        item.GetValue("DisplayIcon") as string ?? "");   // as：畸形 REG_DWORD 等不抛 InvalidCast
                 }
             }
     }
@@ -1419,8 +1684,11 @@ public sealed class RegistryScanSource(IUninstallRegistry registry) : IScanSourc
 
     private static string? ResolveExe(RegistryEntry entry, KnownTool known)
     {
+        // DisplayIcon 常指向 .ico/.dll 资源（如 "app.exe,0" / "app.ico" / "imageres.dll,-101"），
+        // 仅当其为可启动扩展名且 exe 名与已知工具一致时直取，否则回落 InstallLocation 探测。
         var icon = entry.DisplayIcon.Split(',')[0].Trim().Trim('"');
         if (icon.Length > 0 && File.Exists(icon)
+            && PathSearch.CliExtensions.Contains(Path.GetExtension(icon), StringComparer.OrdinalIgnoreCase)
             && KnownTools.MatchByExeName(icon)?.Name == known.Name)
             return Path.GetFullPath(icon);
 
@@ -1437,8 +1705,6 @@ public sealed class RegistryScanSource(IUninstallRegistry registry) : IScanSourc
 `src/ForgeDeck.Core/Scanning/StartMenuScanSource.cs`：
 
 ```csharp
-using System.Runtime.InteropServices;
-
 namespace ForgeDeck.Core.Scanning;
 
 public interface IShellLinkResolver
@@ -1457,8 +1723,10 @@ public sealed class WScriptShellLinkResolver : IShellLinkResolver
             var target = (string)shortcut.TargetPath;
             return target.Length > 0 ? target : null;
         }
-        catch (COMException)
+        catch (Exception)
         {
+            // 按单文件失败处理：ProgID 缺失（ArgumentNullException）、dynamic 绑定失败
+            // （RuntimeBinderException）等环境异常不应冒泡废掉整个开始菜单源。
             return null;
         }
     }
@@ -1479,7 +1747,15 @@ public class StartMenuScanSource(IShellLinkResolver resolver) : IScanSource
         foreach (var dir in MenuDirs)
         {
             if (!Directory.Exists(dir)) continue;
-            foreach (var lnk in Directory.EnumerateFiles(dir, "*.lnk", SearchOption.AllDirectories))
+            // IgnoreInaccessible：跳过 ACL 拒绝的不可访问子目录，避免整源报废（被源级隔离静默吞掉）；
+            // AttributesToSkip = 0 必须显式设置：默认 Hidden|System 会静默跳过隐藏属性的 .lnk，改变语义。
+            var eo = new EnumerationOptions
+            {
+                RecurseSubdirectories = true,
+                IgnoreInaccessible = true,
+                AttributesToSkip = 0,
+            };
+            foreach (var lnk in Directory.EnumerateFiles(dir, "*.lnk", eo))
             {
                 var target = resolver.ResolveTarget(lnk);
                 if (target == null || !File.Exists(target)) continue;
@@ -1494,16 +1770,43 @@ public class StartMenuScanSource(IShellLinkResolver resolver) : IScanSource
 
 测试项目需要 COM 互运用 dynamic：`tests/ForgeDeck.Core.Tests/ForgeDeck.Core.Tests.csproj` 确认含 `<UseRidSourceGenerate>false</UseRidSourceGenerate>` 不需要；`dynamic` 在 net8.0 开箱可用，无需额外包。
 
-- [ ] **步骤 3：运行测试验证通过**
+实施备注：注册表/COM API 带 `[SupportedOSPlatform("windows")]`，纯 `net8.0` 目标会触发 CA1416 平台兼容警告（与「build 0 警告」门槛冲突）。故将 `src/ForgeDeck.Core/ForgeDeck.Core.csproj` 与 `tests/ForgeDeck.Core.Tests/ForgeDeck.Core.Tests.csproj` 的 TargetFramework 改为 `net8.0-windows`（App 本就是 `net8.0-windows`，产品为 Windows 专用启动器；净效果 0 警告，代码本身不变）。
 
-运行：`dotnet test --filter RegistryAndStartMenuTests` → 预期 3 Passed。
+- [x] **步骤 3：运行测试验证通过**
 
-- [ ] **步骤 4：Commit**
+运行：`dotnet test --filter RegistryAndStartMenuTests` → 预期 3 Passed；全量 `dotnet test` → 全绿（30+3=33 左右）；`dotnet build` → 0 警告。
+
+- [x] **步骤 4：Commit**
 
 ```bash
 git add src/ForgeDeck.Core tests/ForgeDeck.Core.Tests
 git commit -m "feat(core): 注册表卸载项与开始菜单快捷方式扫描源"
 ```
+
+- [x] **步骤 5（本任务追加）：ThrowingSource 迭代器化**
+
+`tests/ForgeDeck.Core.Tests/ToolScannerTests.cs` 里的 `ThrowingSource` 当前是 `=> throw` 表达式体（调用即抛），改为迭代器形式（先 `yield return` 一条指向不存在路径的假 hit，再 `throw new InvalidOperationException("源爆炸")`），使 `Scan_ContinuesWhenSourceThrows` 真正覆盖 MoveNext 期间抛异常的路径。改完确认全量测试仍绿，随本任务一起提交：
+
+```csharp
+    private sealed class ThrowingSource : IScanSource
+    {
+        // 迭代器形式：先产出一条指向不存在路径的假 hit，再在枚举（MoveNext）期间抛异常，
+        // 使 Scan_ContinuesWhenSourceThrows 覆盖 ToolScanner 立即枚举期间的异常隔离路径。
+        public IEnumerable<ScanHit> Scan(ScanContext context)
+        {
+            yield return new ScanHit(Path.Combine(Path.GetTempPath(), "forgedeck-ghost.exe"), null, "爆炸源");
+            throw new InvalidOperationException("源爆炸");
+        }
+    }
+```
+
+- [x] **步骤 6（质量审查修复）：开始菜单枚举容错与解析异常面收紧**
+
+审查发现三处问题，均已修复并随 `fix(core): 开始菜单枚举容错与解析异常面收紧` 提交：
+
+1. `StartMenuScanSource` 的 `Directory.EnumerateFiles(dir, "*.lnk", SearchOption.AllDirectories)` 遇不可访问子目录抛 `UnauthorizedAccessException` 且已产出为 0（整源报废、被源级隔离静默吞掉）。改用 `new EnumerationOptions { RecurseSubdirectories = true, IgnoreInaccessible = true, AttributesToSkip = 0 }`——`AttributesToSkip = 0` 必须显式设置（默认 Hidden|System 会静默跳过隐藏属性的 .lnk，改变语义）。
+2. `WScriptShellLinkResolver.ResolveTarget` 的 catch 从 `COMException` 放宽为 `catch (Exception)`（ProgID 缺失/RuntimeBinderException 等环境异常按单文件失败处理，不应废源）；`RegistryScanSource` 的 `(string?)item.GetValue(...)` 改为 `item.GetValue(...) as string` 消除畸形 REG_DWORD 的 `InvalidCastException` 面。
+3. 测试覆盖缺口补齐：`RegistrySource_FallsBackToInstallLocation_WhenIconNotExecutable`（DisplayIcon 指向 .ico → 回落 InstallLocation，红测试还暴露了 `MatchByExeName("cursor.ico")` 同名命中导致 .ico 被当作可执行返回的缺陷，已在 ResolveExe 加 `PathSearch.CliExtensions` 扩展名白名单）、`RegistrySource_ToleratesNonStringRegistryValues`（REG_DWORD 容错，红→绿证据）、`StartMenuSource_ResolvesLnkTarget` 的 .lnk 移入 menuDir 子目录（覆盖递归枚举路径）。
 
 ---
 
@@ -1513,11 +1816,13 @@ git commit -m "feat(core): 注册表卸载项与开始菜单快捷方式扫描�
 - 创建：`src/ForgeDeck.Core/Launching/LaunchService.cs`
 - 测试：`tests/ForgeDeck.Core.Tests/LaunchServiceTests.cs`
 
-- [ ] **步骤 1：编写失败的测试**
+- [x] **步骤 1：编写失败的测试**
 
 `tests/ForgeDeck.Core.Tests/LaunchServiceTests.cs`：
 
 ```csharp
+using System.Diagnostics;
+using System.Runtime.InteropServices;
 using ForgeDeck.Core;
 using ForgeDeck.Core.Launching;
 
@@ -1540,6 +1845,8 @@ public class LaunchServiceTests : IDisposable
     [InlineData("", new string[0])]
     [InlineData("  --a   --b  ", new[] { "--a", "--b" })]
     [InlineData("'quoted arg'", new[] { "quoted arg" })]
+    [InlineData(@"--model ""unclosed", new[] { "--model", "unclosed" })]
+    [InlineData(@"/x """" /y", new[] { "/x", "", "/y" })]
     public void SplitArgs_HandlesQuotesAndWhitespace(string input, string[] expected)
     {
         Assert.Equal(expected, LaunchService.SplitArgs(input));
@@ -1587,6 +1894,14 @@ public class LaunchServiceTests : IDisposable
     }
 
     [Fact]
+    public void BuildCommand_UnsupportedExtension_Throws()
+    {
+        var py = Path.Combine(_dir, "tool.py");
+        File.WriteAllText(py, "");
+        Assert.Throws<NotSupportedException>(() => _service.BuildCommand(Tool(py), Profile()));
+    }
+
+    [Fact]
     public void Validate_MissingExe_ThrowsWithMessage()
     {
         var ex = Assert.Throws<InvalidOperationException>(
@@ -1608,7 +1923,7 @@ public class LaunchServiceTests : IDisposable
     {
         var exe = Path.Combine(_dir, "tool.exe");
         File.WriteAllText(exe, "");
-        _service.Validate(Tool(exe), Profile()); // 不抛即通过
+        _service.Validate(Tool(exe), Profile());
         Assert.Equal(
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
             LaunchService.ResolveWorkdir(Profile()));
@@ -1639,32 +1954,78 @@ public class LaunchServiceTests : IDisposable
         profile.Env["K"] = "V";
         var psi = _service.BuildExternalStartInfo(Tool(exe), profile);
         Assert.Equal(exe, psi.FileName);
-        Assert.Equal("--model \"sonnet 4\"", psi.Arguments);   // 外部启动保留原始串
+        // 外部启动：分词重组，含空白的参数重新引用（"sonnet 4" 不裂成两个参数）
+        Assert.Equal("--model \"sonnet 4\"", psi.Arguments);
         Assert.Equal(_dir, psi.WorkingDirectory);
         Assert.Equal("V", psi.EnvironmentVariables["K"]);
         Assert.False(psi.UseShellExecute);
     }
 
     [Fact]
+    public void BuildExternalStartInfo_Ps1_WrapsWithPowerShellHost()
+    {
+        var script = Path.Combine(_dir, "tool.ps1");
+        File.WriteAllText(script, "");
+        var psi = _service.BuildExternalStartInfo(Tool(script), Profile("-Flag x", _dir));
+        Assert.True(psi.FileName.Contains("pwsh") || psi.FileName.Contains("powershell"), $"实际 FileName: {psi.FileName}");
+        Assert.Equal($"-File \"{script}\" -Flag x", psi.Arguments);
+    }
+
+    [Fact]
+    public void BuildExternalStartInfo_ClaudeAutoRestore_AppendsResumeArgs()
+    {
+        var script = Path.Combine(_dir, "claude.cmd");
+        File.WriteAllText(script, "");
+        var psi = _service.BuildExternalStartInfo(Tool(script), Profile("--model x", _dir, autoRestore: true));
+        Assert.Equal("--model x --continue", psi.Arguments);
+    }
+
+    [Fact]
     public void LaunchExternal_CmdExitsWithCode()
     {
         var cmdPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe");
-        var tool = Tool(cmdPath);
-        var profile = Profile("/c exit 3", _dir);
-        using var process = Process.Start(_service.BuildExternalStartInfo(tool, profile))!;
-        Assert.True(process.WaitForExit(5000));
-        Assert.Equal(3, process.ExitCode);
+        var pid = _service.LaunchExternal(Tool(cmdPath), Profile("/c exit 3", _dir));
+        Assert.Equal(3, WaitForExitCode(pid, 5000));
     }
+
+    [Fact]
+    public void LaunchExternal_Ps1Script_ExitsWithCode()
+    {
+        var script = Path.Combine(_dir, "exit5.ps1");
+        File.WriteAllText(script, "exit 5");
+        var pid = _service.LaunchExternal(Tool(script), Profile(workdir: _dir));
+        Assert.Equal(5, WaitForExitCode(pid, 15000));
+    }
+
+    /// <summary>
+    /// GetProcessById 得到的 Process 组件在 .NET 上不填充 ExitCode
+    /// （抛 "Process was not started by this object"），故经句柄 P/Invoke 取退出码；
+    /// 句柄须在等待退出之前取得（进程退出后 Handle 会重新 OpenProcess 并失败）。
+    /// </summary>
+    private static int WaitForExitCode(int pid, int timeoutMs)
+    {
+        using var process = Process.GetProcessById(pid);
+        var handle = process.Handle;
+        if (!process.WaitForExit(timeoutMs))
+            throw new TimeoutException($"进程 {pid} 在 {timeoutMs}ms 内未退出");
+        if (!GetExitCodeProcess(handle, out var code))
+            throw new InvalidOperationException($"获取进程 {pid} 退出码失败");
+        return code;
+    }
+
+    [DllImport("kernel32.dll")]
+    private static extern bool GetExitCodeProcess(IntPtr hProcess, out int lpExitCode);
 }
 ```
 
 运行：`dotnet test --filter LaunchServiceTests` → 预期编译失败。
 
-- [ ] **步骤 2：实现 LaunchService**
+- [x] **步骤 2：实现 LaunchService**
 
 `src/ForgeDeck.Core/Launching/LaunchService.cs`：
 
 ```csharp
+using System.Diagnostics;
 using System.Text;
 using ForgeDeck.Core.Scanning;
 
@@ -1701,13 +2062,30 @@ public sealed class LaunchService
         return result;
     }
 
-    public LaunchCommand BuildCommand(ToolInfo tool, LaunchProfile profile)
+    /// <summary>PowerShell 宿主三级回退：PATH 上的 pwsh → PATH 上的 powershell → System32 全路径。</summary>
+    private static string ResolvePowerShellHost() =>
+        PathSearch.FindOnPath("pwsh")
+        ?? PathSearch.FindOnPath("powershell")
+        ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "powershell.exe");
+
+    /// <summary>分词结果 + AutoRestore 追加的 ResumeArgs（已含则不重复）——内嵌/外部双轨共用。</summary>
+    private static List<string> EffectiveArgs(ToolInfo tool, LaunchProfile profile)
     {
-        var ext = Path.GetExtension(tool.ExePath).ToLowerInvariant();
         var args = SplitArgs(profile.Args).ToList();
         var known = KnownTools.MatchByExeName(tool.ExePath);
         if (profile.AutoRestore && known?.ResumeArgs is { } resume && !args.Contains(resume))
             args.Add(resume);
+        return args;
+    }
+
+    /// <summary>含空白的参数重新加引号（避免重组命令行时裂成多个参数）。</summary>
+    private static string QuoteIfSpaced(string token) =>
+        token.Any(char.IsWhiteSpace) ? $"\"{token}\"" : token;
+
+    public LaunchCommand BuildCommand(ToolInfo tool, LaunchProfile profile)
+    {
+        var ext = Path.GetExtension(tool.ExePath).ToLowerInvariant();
+        var args = EffectiveArgs(tool, profile);
         return ext switch
         {
             ".exe" => new LaunchCommand(tool.ExePath, args),
@@ -1715,7 +2093,7 @@ public sealed class LaunchService
                 Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe"),
                 new[] { "/c", tool.ExePath }.Concat(args).ToList()),
             ".ps1" => new LaunchCommand(
-                PathSearch.FindOnPath("pwsh") ?? "powershell.exe",
+                ResolvePowerShellHost(),
                 new[] { "-File", tool.ExePath }.Concat(args).ToList()),
             _ => throw new NotSupportedException($"不支持的启动文件类型：{ext}"),
         };
@@ -1749,10 +2127,14 @@ public sealed class LaunchService
     public ProcessStartInfo BuildExternalStartInfo(ToolInfo tool, LaunchProfile profile)
     {
         Validate(tool, profile);
+        var ext = Path.GetExtension(tool.ExePath).ToLowerInvariant();
+        // 外部轨道：分词重组（AutoRestore 追加 ResumeArgs），含空白的参数重新引用；
+        // .ps1 由 PowerShell 宿主包装执行（CreateProcess 无法直接执行脚本，与内嵌轨道语义一致）。
+        var joined = string.Join(' ', EffectiveArgs(tool, profile).Select(QuoteIfSpaced));
         var psi = new ProcessStartInfo
         {
-            FileName = tool.ExePath,
-            Arguments = profile.Args,
+            FileName = ext == ".ps1" ? ResolvePowerShellHost() : tool.ExePath,
+            Arguments = ext == ".ps1" ? $"-File \"{tool.ExePath}\"{(joined.Length > 0 ? " " + joined : "")}" : joined,
             WorkingDirectory = ResolveWorkdir(profile),
             UseShellExecute = false,
         };
@@ -1770,15 +2152,29 @@ public sealed class LaunchService
 }
 ```
 
-- [ ] **步骤 3：运行测试验证通过**
+- [x] **步骤 3：运行测试验证通过**
 
-运行：`dotnet test --filter LaunchServiceTests` → 预期全部 Passed（含 4 条 InlineData）。
+运行：`dotnet test --filter LaunchServiceTests` → 预期全部 Passed（含 6 条 InlineData，共 20 条）。
 
-- [ ] **步骤 4：Commit**
+- [x] **步骤 4：Commit**
 
 ```bash
 git add src/ForgeDeck.Core tests/ForgeDeck.Core.Tests
 git commit -m "feat(core): 启动服务——校验/命令包装/env 展开/外部启动"
+```
+
+- [x] **步骤 5（审查修复追加）：ps1 外部启动宿主包装与双轨一致性**
+
+审查发现四项问题，按 TDD 修复（上方代码块已为修复后最终版）：
+
+1.（Important）`BuildExternalStartInfo` 对 `.ps1` 直接 FileName=ExePath，CreateProcess 无法执行（实测抛 Win32Exception）。修复：`.ps1` 外部启动由 PowerShell 宿主包装（`-File "脚本" 参数...`），宿主解析统一为三级回退 `ResolvePowerShellHost()`：PATH 上的 pwsh → PATH 上的 powershell → System32 全路径；`BuildCommand` 的 `.ps1` 分支同样改用三级回退（消除裸相对名 `powershell.exe`）。补真实进程集成测试：`LaunchExternal_Ps1Script_ExitsWithCode`（powershell -File 脚本 `exit 5`，验退出码）。
+2.（Minor）`LaunchExternal_CmdExitsWithCode` 改为真正调用 `_service.LaunchExternal(tool, profile)`。注：`Process.GetProcessById(pid)` 的 `ExitCode` 在 .NET 上抛 "Process was not started by this object"（组件不填充退出码），且 `Handle` 须在等待退出前取得（进程退出后重新 OpenProcess 失败）——测试经 `WaitForExitCode` helper（GetProcessById + 先取句柄 + P/Invoke `GetExitCodeProcess`）等退出验码。
+3.（Minor）AutoRestore 双轨一致：外部轨道 `Arguments` 改为 `SplitArgs` 分词（AutoRestore 追加 ResumeArgs）重组——含空白的参数经 `QuoteIfSpaced` 重新引用（否则 `"sonnet 4"` 裂成两个参数），空格 join。补断言：`BuildExternalStartInfo_ClaudeAutoRestore_AppendsResumeArgs`（Arguments == "--model x --continue"）。
+4.（Minor）补测试：`BuildCommand_UnsupportedExtension_Throws`（.py 抛 NotSupportedException）；SplitArgs 未闭合引号与空引号对两条 InlineData。
+
+```bash
+git add src/ForgeDeck.Core tests/ForgeDeck.Core.Tests docs/superpowers/plans
+git commit -m "fix(core): ps1 外部启动宿主包装与双轨一致性"
 ```
 
 ---
@@ -1789,7 +2185,7 @@ git commit -m "feat(core): 启动服务——校验/命令包装/env 展开/外�
 - 创建：`src/ForgeDeck.Core/Terminal/TerminalSessionManager.cs`
 - 测试：`tests/ForgeDeck.Core.Tests/TerminalSessionManagerTests.cs`
 
-- [ ] **步骤 1：编写失败的集成测试**
+- [x] **步骤 1：编写失败的集成测试**
 
 `tests/ForgeDeck.Core.Tests/TerminalSessionManagerTests.cs`：
 
@@ -1827,17 +2223,15 @@ public class TerminalSessionManagerTests : IDisposable
         finally { mgr.Output -= OnOutput; }
     }
 
-    private static Task<int> WaitForExitAsync(TerminalSessionManager mgr, string sessionId, TimeSpan timeout)
+    private static async Task<int> WaitForExitAsync(TerminalSessionManager mgr, string sessionId, TimeSpan timeout)
     {
         var tcs = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
         void OnExit(string id, int code) { if (id == sessionId) tcs.TrySetResult(code); }
         mgr.Exited += OnExit;
-        return Task.WhenAny(tcs.Task, Task.Delay(timeout)).ContinueWith(_ =>
-        {
-            mgr.Exited -= OnExit;
-            Assert.True(tcs.Task.IsCompleted, "超时未收到退出事件");
-            return tcs.Task.Result;
-        });
+        var winner = await Task.WhenAny(tcs.Task, Task.Delay(timeout));
+        mgr.Exited -= OnExit;
+        Assert.True(tcs.Task.IsCompleted, "超时未收到退出事件");
+        return tcs.Task.Result;
     }
 
     [Fact]
@@ -1850,6 +2244,28 @@ public class TerminalSessionManagerTests : IDisposable
         var session = Assert.Single(_mgr.List());
         Assert.False(session.Running);
         Assert.Equal(0, session.ExitCode);
+    }
+
+    [Fact]
+    public async Task Create_SpaceInArgument_SurvivesCommandLine()
+    {
+        // verbatim 模式 Porta 不加引号，引号由管理器的 QuoteIfSpaced 自行添加；
+        // 含连续双空格的参数作单 token 到达时，cmd echo 原样回显带引号原文（"forge  deck"）。
+        // 实测：cmd echo 不重 join、不折叠空格——引号丢失（参数裂开）时回显不含引号，
+        // 故断言带引号 + 双空格才真正可捕捉 QuoteIfSpaced 被误删的回归。
+        var id = await _mgr.CreateAsync("echo2", CmdExe,
+            new[] { "/c", "echo", "forge  deck" }, Path.GetTempPath());
+        await WaitForOutputAsync(_mgr, id, acc => acc.Contains("\"forge  deck\""), TimeSpan.FromSeconds(10));
+        await WaitForExitAsync(_mgr, id, TimeSpan.FromSeconds(10));
+    }
+
+    [Fact]
+    public async Task EnvVars_ReachChildProcess()
+    {
+        var id = await _mgr.CreateAsync("env", CmdExe, new[] { "/c", "echo %FD_TEST_A%" }, Path.GetTempPath(),
+            env: new Dictionary<string, string> { ["FD_TEST_A"] = "forge-env-ok" });
+        await WaitForOutputAsync(_mgr, id, acc => acc.Contains("forge-env-ok"), TimeSpan.FromSeconds(10));
+        await WaitForExitAsync(_mgr, id, TimeSpan.FromSeconds(10));
     }
 
     [Fact]
@@ -1874,11 +2290,12 @@ public class TerminalSessionManagerTests : IDisposable
     }
 
     [Fact]
-    public async Task Close_RemovesSessionFromList()
+    public async Task Close_RemovesSessionFromList_AndKillsProcess()
     {
         var id = await _mgr.CreateAsync("shell", CmdExe, new[] { "/k" }, Path.GetTempPath());
         await Task.Delay(600);
         _mgr.Close(id);
+        await WaitForExitAsync(_mgr, id, TimeSpan.FromSeconds(10));
         Assert.Empty(_mgr.List());
     }
 
@@ -1897,7 +2314,7 @@ public class TerminalSessionManagerTests : IDisposable
 
 运行：`dotnet test --filter TerminalSessionManagerTests` → 预期编译失败。
 
-- [ ] **步骤 2：实现会话管理器**
+- [x] **步骤 2：实现会话管理器**
 
 `src/ForgeDeck.Core/Terminal/TerminalSessionManager.cs`：
 
@@ -1912,12 +2329,14 @@ public sealed record TerminalSessionInfo(string SessionId, string Title, string 
 
 public sealed class TerminalSessionManager : IDisposable
 {
+    private static readonly TimeSpan CloseWaitTimeout = TimeSpan.FromSeconds(2);
+
     private readonly Dictionary<string, Session> _sessions = new();
     private readonly object _gate = new();
 
     /// <summary>终端输出（sessionId, chunk，UTF-8 已解码）。</summary>
     public event Action<string, string>? Output;
-    /// <summary>进程退出（sessionId, exitCode）。</summary>
+    /// <summary>进程退出（sessionId, exitCode；每个会话恰好触发一次）。</summary>
     public event Action<string, int>? Exited;
     /// <summary>会话列表或运行状态变化。</summary>
     public event Action? Changed;
@@ -1926,8 +2345,9 @@ public sealed class TerminalSessionManager : IDisposable
         string title, string app, IReadOnlyList<string> args, string workdir,
         IReadOnlyDictionary<string, string>? env = null, int cols = 120, int rows = 30)
     {
-        // 合并全量环境变量，避免子进程丢 PATH 等基础变量
-        var merged = new Dictionary<string, string>();
+        // 合并全量环境变量，避免子进程丢 PATH 等基础变量；
+        // 忽略大小写去重（Windows 环境变量名不区分大小写），同名时用户值覆盖继承值
+        var merged = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (DictionaryEntry e in Environment.GetEnvironmentVariables())
             merged[(string)e.Key] = (string)e.Value!;
         if (env != null)
@@ -1935,6 +2355,9 @@ public sealed class TerminalSessionManager : IDisposable
                 merged[key] = value;
 
         var id = Guid.NewGuid().ToString("N");
+        // Porta.Pty 非 verbatim 模式会给每个参数加引号（含 "/c"），cmd.exe 无法解析；
+        // 改用 verbatim + 仅给含空白的参数加引号（与 LaunchService.QuoteIfSpaced 约定一致），
+        // App 路径的引号始终由 Porta 负责（带空格路径已验证）。
         var connection = await PtyProvider.SpawnAsync(new PtyOptions
         {
             Name = title,
@@ -1942,34 +2365,59 @@ public sealed class TerminalSessionManager : IDisposable
             Rows = rows,
             Cwd = workdir,
             App = app,
-            CommandLine = args.ToArray(),
+            CommandLine = args.Select(QuoteIfSpaced).ToArray(),
+            VerbatimCommandLine = true,
             Environment = merged,
         }, CancellationToken.None);
 
         var session = new Session(id, title, workdir, connection);
         lock (_gate) { _sessions[id] = session; }
-        connection.ProcessExited += (_, e) =>
-        {
-            session.Running = false;
-            session.ExitCode = e.ExitCode;
-            Exited?.Invoke(id, e.ExitCode);
-            Changed?.Invoke();
-        };
+        connection.ProcessExited += (_, e) => AnnounceExit(session, e.ExitCode);
         _ = PumpOutputAsync(session);
+        // 极端竞态：进程在订阅事件前已退出（事件已丢）——主动探测补报，恰好一次语义由 AnnounceExit 保证
+        try { if (connection.WaitForExit(0)) AnnounceExit(session, SafeExitCode(session)); }
+        catch { }
         Changed?.Invoke();
         return id;
+    }
+
+    /// <summary>含空白的参数加引号，其余原样（Windows 命令行惯例）。</summary>
+    private static string QuoteIfSpaced(string token) =>
+        token.Any(char.IsWhiteSpace) ? $"\"{token}\"" : token;
+
+    /// <summary>标记退出并广播 Exited/Changed，恰好一次（Porta 事件与主动补报可能竞争）。</summary>
+    private void AnnounceExit(Session session, int exitCode)
+    {
+        if (!session.TryMarkExited(exitCode)) return;
+        Exited?.Invoke(session.Id, exitCode);
+        Changed?.Invoke();
+    }
+
+    private static int SafeExitCode(Session session)
+    {
+        try { return session.Connection.ExitCode; }
+        catch { return -1; }
     }
 
     private async Task PumpOutputAsync(Session session)
     {
         var buffer = new byte[8192];
+        var chars = new char[Encoding.UTF8.GetMaxCharCount(buffer.Length)];
+        // 有状态解码器：跨 chunk 的多字节 UTF-8 序列不会裂成 U+FFFD
+        var decoder = Encoding.UTF8.GetDecoder();
         try
         {
             while (true)
             {
                 var read = await session.Connection.ReaderStream.ReadAsync(buffer.AsMemory(0, buffer.Length));
                 if (read <= 0) break;
-                Output?.Invoke(session.Id, Encoding.UTF8.GetString(buffer, 0, read));
+                var count = decoder.GetChars(buffer, 0, read, chars, 0);
+                if (count > 0)
+                {
+                    // 订阅者异常不得杀死输出泵（否则该会话剩余输出永久丢失）
+                    try { Output?.Invoke(session.Id, new string(chars, 0, count)); }
+                    catch { }
+                }
             }
         }
         catch (ObjectDisposedException) { }
@@ -1994,7 +2442,10 @@ public sealed class TerminalSessionManager : IDisposable
         try { session.Connection.Kill(); } catch { }
     }
 
-    /// <summary>关闭并从列表移除会话（标签页 × 按钮）。</summary>
+    /// <summary>关闭并从列表移除会话（标签页 × 按钮）。kill/等退出/释放连接放后台执行：
+    /// ① 立即 Dispose 会拆掉 Porta 的退出监视（Process.Exited 先退订），Exited 事件永远不发；
+    /// ② 若在本方法内同步等退出，WaitForExit 会在调用线程上同步触发 Process.Exited——
+    ///    而调用方往往在 Close 返回后才订阅 Exited，同步触发必然错过。后台化让事件一定晚于 Close 返回。</summary>
     public void Close(string sessionId)
     {
         Session? session;
@@ -2003,8 +2454,21 @@ public sealed class TerminalSessionManager : IDisposable
             if (!_sessions.TryGetValue(sessionId, out session)) return;
             _sessions.Remove(sessionId);
         }
-        try { if (session.Running) session.Connection.Kill(); } catch { }
-        session.Dispose();
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                if (session.Running)
+                {
+                    session.Connection.Kill();
+                    session.Connection.WaitForExit((int)CloseWaitTimeout.TotalMilliseconds);
+                    // 事件未及送达（或 kill 失败）则补报，恰好一次
+                    if (session.Running) AnnounceExit(session, SafeExitCode(session));
+                }
+            }
+            catch { }
+            finally { session.Dispose(); }
+        });
         Changed?.Invoke();
     }
 
@@ -2045,33 +2509,83 @@ public sealed class TerminalSessionManager : IDisposable
             all = _sessions.Values.ToList();
             _sessions.Clear();
         }
-        foreach (var s in all) s.Dispose();
+        foreach (var s in all)
+        {
+            try
+            {
+                if (s.Running)
+                {
+                    s.Connection.Kill();
+                    s.Connection.WaitForExit((int)CloseWaitTimeout.TotalMilliseconds);
+                    if (s.Running) AnnounceExit(s, SafeExitCode(s));
+                }
+            }
+            catch { }
+            s.Dispose();
+        }
     }
 
     private sealed class Session(string id, string title, string workdir, IPtyConnection connection) : IDisposable
     {
+        private int _exitAnnounced;
+
         public string Id { get; } = id;
         public string Title { get; } = title;
         public string Workdir { get; } = workdir;
         public DateTime StartedAt { get; } = DateTime.UtcNow;
         public IPtyConnection Connection { get; } = connection;
-        public bool Running { get; set; } = true;
-        public int ExitCode { get; set; } = -1;
+
+        private bool _running = true;
+
+        /// <summary>跨线程可见：ExitCode 先写、Running 后写（release），读侧见 Running=false 即可见 ExitCode。</summary>
+        public bool Running
+        {
+            get => Volatile.Read(ref _running);
+            private set => Volatile.Write(ref _running, value);
+        }
+
+        private int _exitCode = -1;
+        public int ExitCode { get => _exitCode; private set => _exitCode = value; }
+
+        /// <summary>记录退出状态；返回 false 表示已报过（防 Porta 事件与主动补报双发）。</summary>
+        public bool TryMarkExited(int exitCode)
+        {
+            if (Interlocked.Exchange(ref _exitAnnounced, 1) == 1) return false;
+            ExitCode = exitCode;
+            Running = false;
+            return true;
+        }
+
         public void Dispose() => Connection.Dispose();
     }
 }
 ```
 
-- [ ] **步骤 3：运行测试验证通过**
+- [x] **步骤 3：运行测试验证通过**
 
-运行：`dotnet test --filter TerminalSessionManagerTests` → 预期 5 Passed（约 5-10 秒，含真实 ConPTY 进程）。
+运行：`dotnet test --filter TerminalSessionManagerTests` → 预期 7 Passed（约 2-5 秒，含真实 ConPTY 进程）。
 
-- [ ] **步骤 4：Commit**
+- [x] **步骤 4：Commit**
 
 ```bash
 git add src/ForgeDeck.Core tests/ForgeDeck.Core.Tests
 git commit -m "feat(core): ConPTY 终端会话管理器（输出流/输入/resize/kill/close）"
 ```
+
+- [x] **步骤 5（实现偏差记录，Porta.Pty 1.0.7 实测）：**
+
+反编译/对照实验发现两处与 README 印象不符的实际行为，实现做了最小调整：
+
+1. **参数引号**：非 verbatim 模式 Porta 给**每个**参数加引号（`"/c" "echo hi"`），cmd.exe 无法解析（实测 `'"echo hi' 不是内部或外部命令`、退出码 1；含空格 App 路径同样失败）。修复：`VerbatimCommandLine = true` + 自行按 Windows 惯例仅给含空白参数加引号（与 `LaunchService.QuoteIfSpaced` 一致）；App 路径引号由 Porta 始终负责（带空格路径实测通过）。
+2. **Close 的 Dispose 顺序**：`PseudoConsoleConnection.Dispose()` 第一步就 `process.Exited -= handler`，Kill 后立即 Dispose 则 ProcessExited 永不触发；且 `Process.WaitForExit(ms)` 会在调用线程上**同步**触发 Process.Exited，而调用方在 `Close` 返回后才订阅 `Exited`——同步触发必然错过。修复：Close 移除会话后由后台任务执行 kill → 有界 WaitForExit(2s) → 补报（若事件未达）→ Dispose；`Session.TryMarkExited` 用 Interlocked 保证 Exited 恰好一次（Porta 事件与补报竞争安全）。
+3. 顺带加固：输出泵用有状态 UTF-8 Decoder（跨 chunk 多字节序列不裂成 U+FFFD）；CreateAsync 订阅后 `WaitForExit(0)` 探测"订阅前已退出"的竞态并补报。
+
+- [x] **步骤 6（质量审查加固）：**
+
+1. 【Important】`Create_SpaceInArgument_SurvivesCommandLine` 断言强化：参数改含连续双空格（`forge  deck`）。实测 cmd echo **不重 join、不折叠空格**——引号丢失时双空格仍在，单靠 `Contains` 无法区分；而参数作单 token（带引号）到达时 echo 原样回显**含引号**原文，故断言定为 `Contains("\"forge  deck\"")`（带引号 + 双空格）。变异验证：临时删除 QuoteIfSpaced 的加引号逻辑，该测试立刻红。注释同步更正（verbatim 模式 Porta 不加引号，引号由 QuoteIfSpaced 自行添加）。
+2. 【Minor】输出泵 `Output?.Invoke` 包 try/catch：订阅者异常不得杀死泵（否则该会话剩余输出永久丢失）。
+3. 【Minor】merged 环境字典用 `StringComparer.OrdinalIgnoreCase` 初始化：避免 `Path`/`path` 类大小写变体重复键，同名时用户值覆盖继承值。
+4. 【Minor】`Session.Running` 改 `Volatile.Read`/`Volatile.Write`：补齐跨线程可见性；写入顺序 ExitCode 先、Running（release）后，读侧见 `Running=false` 即可见最终 ExitCode。
 
 ---
 
@@ -2099,6 +2613,10 @@ public class BridgeTests : IDisposable
 {
     private readonly string _dir = Path.Combine(Path.GetTempPath(), "forgedeck-tests", Guid.NewGuid().ToString("N"));
     private readonly ConfigStore _store = null!;
+    // TerminalCreate_WithCmdTool 会 spawn 真实进程：终端必须存字段并在 Dispose 释放
+    private readonly TerminalSessionManager _terminal = new();
+    // 可注入命中：rescan 复用测试需要扫描器返回既有工具同路径的命中
+    private readonly List<ScanHit> _scanHits = new();
     private readonly ForgeDeckBridge _bridge = null!;
 
     public BridgeTests()
@@ -2108,24 +2626,26 @@ public class BridgeTests : IDisposable
         _store.Load();
         _bridge = new ForgeDeckBridge(
             _store,
-            new ToolScanner(new IScanSource[] { new EmptySource() }),
-            new TerminalSessionManager());
+            new ToolScanner(new IScanSource[] { new FixedSource(_scanHits) }),
+            _terminal);
     }
 
     public void Dispose()
     {
+        _terminal.Dispose();
         try { Directory.Delete(_dir, true); } catch { }
     }
 
-    private sealed class EmptySource : IScanSource
+    private sealed class FixedSource(List<ScanHit> hits) : IScanSource
     {
-        public IEnumerable<ScanHit> Scan(ScanContext context) { yield break; }
+        public IEnumerable<ScanHit> Scan(ScanContext context) => hits;
     }
 
     private static JsonElement ResultOf(string response)
     {
+        // Clone 脱离文档生命周期：using 释放后返回的 JsonElement 仍可安全访问
         using var doc = JsonDocument.Parse(response);
-        return doc.RootElement.GetProperty("result");
+        return doc.RootElement.GetProperty("result").Clone();
     }
 
     private static (string Code, string Message)? ErrorOf(string response)
@@ -2153,6 +2673,19 @@ public class BridgeTests : IDisposable
     }
 
     [Fact]
+    public async Task HandleAsync_NullBodyOrNonStringMethod_ReturnsErrorNotThrow()
+    {
+        // 宿主 TryGetWebMessageAsString 可能返回 null；method 为数字时 GetString 会抛——都不得让异常逃逸
+        var nullResp = await _bridge.Dispatcher.HandleAsync(null!);
+        Assert.NotNull(nullResp);
+        Assert.Equal("-32700", ErrorOf(nullResp!)!.Value.Code);
+
+        var numMethodResp = await _bridge.Dispatcher.HandleAsync("""{"id":40,"method":123}""");
+        Assert.NotNull(numMethodResp);
+        Assert.Equal("-32602", ErrorOf(numMethodResp!)!.Value.Code);
+    }
+
+    [Fact]
     public async Task AppInfo_ReturnsVersionAndUser()
     {
         var resp = await _bridge.Dispatcher.HandleAsync("""{"id":2,"method":"app.info"}""");
@@ -2165,7 +2698,7 @@ public class BridgeTests : IDisposable
     public async Task AddManual_InvalidPath_ReturnsValidationError()
     {
         var resp = await _bridge.Dispatcher.HandleAsync(
-            $$"""{"id":3,"method":"tools.addManual","params":{"name":"X","exePath":"{{Path.Combine(_dir, "ghost.exe").Replace("\\", "\\\\")}}"}}""");
+            $$$"""{"id":3,"method":"tools.addManual","params":{"name":"X","exePath":"{{{Path.Combine(_dir, "ghost.exe").Replace("\\", "\\\\")}}}"}}""");
         var (code, message) = ErrorOf(resp!)!.Value;
         Assert.Equal("validation", code);
         Assert.Contains("可执行文件不存在", message);
@@ -2178,7 +2711,7 @@ public class BridgeTests : IDisposable
         File.WriteAllText(exe, "");
         var exeJson = exe.Replace("\\", "\\\\");
         var resp = await _bridge.Dispatcher.HandleAsync(
-            $$"""{"id":4,"method":"tools.addManual","params":{"name":"MyTool","exePath":"{{exeJson}}"}}""");
+            $$$"""{"id":4,"method":"tools.addManual","params":{"name":"MyTool","exePath":"{{{exeJson}}}"}}""");
         var result = ResultOf(resp!);
         Assert.Equal(1, result.GetArrayLength());
         Assert.Equal("MyTool", result[0].GetProperty("tool").GetProperty("name").GetString());
@@ -2216,36 +2749,109 @@ public class BridgeTests : IDisposable
         var cmdScript = Path.Combine(_dir, "claude.cmd");
         File.WriteAllText(cmdScript, "@echo off\r\necho forge-bridge-e2e\r\n");
         _store.Config.Tools.Add(new ToolInfo { Id = "tc1", Name = "Fake Claude", ExePath = cmdScript, Source = "测试" });
-        var resp = await _bridge.Dispatcher.HandleAsync(
-            """{"id":8,"method":"terminal.create","params":{"toolId":"tc1","cols":80,"rows":24}}""");
-        var sessionId = ResultOf(resp!).GetProperty("sessionId").GetString();
-        Assert.NotNull(sessionId);
 
-        var listResp = await _bridge.Dispatcher.HandleAsync("""{"id":9,"method":"sessions.list"}""");
-        Assert.Equal(1, ResultOf(listResp!).GetArrayLength());
-        // lastUsed 与工作目录历史联动
-        Assert.NotNull(_store.Config.LastUsed);
-        Assert.Equal("tc1", _store.Config.LastUsed!.ToolId);
+        // 事件转发：Output → terminal.data 事件封包（订阅须先于创建，首块输出可能立即可达）
+        var outgoing = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var acc = "";
+        void OnOutgoing(string message)
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(message);
+                if (doc.RootElement.TryGetProperty("event", out var ev) && ev.GetString() == "terminal.data")
+                {
+                    acc += doc.RootElement.GetProperty("data").GetProperty("chunk").GetString() ?? "";
+                    if (acc.Contains("forge-bridge-e2e")) outgoing.TrySetResult(message);
+                }
+            }
+            catch (JsonException) { }
+        }
+        _bridge.Dispatcher.Outgoing += OnOutgoing;
+        try
+        {
+            var resp = await _bridge.Dispatcher.HandleAsync(
+                """{"id":8,"method":"terminal.create","params":{"toolId":"tc1","cols":80,"rows":24}}""");
+            var sessionId = ResultOf(resp!).GetProperty("sessionId").GetString();
+            Assert.NotNull(sessionId);
+
+            var done = await Task.WhenAny(outgoing.Task, Task.Delay(TimeSpan.FromSeconds(2)));
+            Assert.True(done == outgoing.Task, $"超时未收到 terminal.data 事件，累计输出：{acc}");
+            using var payload = JsonDocument.Parse(outgoing.Task.Result);
+            Assert.Equal("terminal.data", payload.RootElement.GetProperty("event").GetString());
+            Assert.Equal(sessionId, payload.RootElement.GetProperty("data").GetProperty("sessionId").GetString());
+
+            var listResp = await _bridge.Dispatcher.HandleAsync("""{"id":9,"method":"sessions.list"}""");
+            Assert.Equal(1, ResultOf(listResp!).GetArrayLength());
+            // lastUsed 与工作目录历史联动
+            Assert.NotNull(_store.Config.LastUsed);
+            Assert.Equal("tc1", _store.Config.LastUsed!.ToolId);
+        }
+        finally { _bridge.Dispatcher.Outgoing -= OnOutgoing; }
     }
 
     [Fact]
-    public async Task TerminalWrite_UnknownSession_ReturnsInternalError()
+    public async Task Rescan_ReusesToolByPath_PreservesIdProfileAndLastUsed()
     {
+        var cmdScript = Path.Combine(_dir, "claude.cmd");
+        File.WriteAllText(cmdScript, "@echo off\r\n");
+        _store.Config.Tools.Add(new ToolInfo { Id = "keep1", Name = "Fake Claude", ExePath = cmdScript, Source = "测试" });
+        await _bridge.Dispatcher.HandleAsync(
+            """{"id":20,"method":"profiles.save","params":{"profile":{"id":"p20","toolId":"keep1","name":"默认","args":"","env":{},"workdir":"","openMode":"external","autoRestore":false}}}""");
+        _store.Config.LastUsed = new LastUsedInfo { ToolId = "keep1", Workdir = _dir };
+
+        // 同路径重扫：复用旧条目（Id 不变、展示字段刷新），profile/lastUsed 不失联
+        _scanHits.Add(new ScanHit(cmdScript, null, "新扫描源"));
+        var resp = await _bridge.Dispatcher.HandleAsync("""{"id":21,"method":"tools.rescan"}""");
+        var list = ResultOf(resp!);
+        Assert.Equal(1, list.GetArrayLength());
+        Assert.Equal("keep1", list[0].GetProperty("tool").GetProperty("id").GetString());
+        Assert.Equal("新扫描源", list[0].GetProperty("tool").GetProperty("source").GetString());
+
+        var profileResp = await _bridge.Dispatcher.HandleAsync(
+            """{"id":22,"method":"profiles.get","params":{"toolId":"keep1"}}""");
+        Assert.Equal("p20", ResultOf(profileResp!).GetProperty("id").GetString());
+
+        Assert.Contains(_store.Config.Tools, t => t.Id == _store.Config.LastUsed!.ToolId);
+    }
+
+    [Fact]
+    public async Task LaunchExternal_CmdExitZero_ReturnsPidAndRecordsUsage()
+    {
+        var cmdExe = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe");
+        _store.Config.Tools.Add(new ToolInfo { Id = "le1", Name = "cmd", ExePath = cmdExe, Source = "测试" });
+        await _bridge.Dispatcher.HandleAsync(
+            """{"id":31,"method":"profiles.save","params":{"profile":{"id":"p31","toolId":"le1","name":"默认","args":"/c exit 0","env":{},"workdir":"","openMode":"external","autoRestore":false}}}""");
         var resp = await _bridge.Dispatcher.HandleAsync(
+            """{"id":32,"method":"launch.external","params":{"toolId":"le1"}}""");
+        Assert.True(ResultOf(resp!).GetProperty("pid").GetInt32() > 0);
+        Assert.NotNull(_store.Config.LastUsed);
+        Assert.Equal("le1", _store.Config.LastUsed!.ToolId);
+    }
+
+    [Fact]
+    public async Task TerminalWrite_UnknownSession_ReturnsSessionGone()
+    {
+        // 关标签瞬间在途 write/resize 是良性竞态：统一映射为 session-gone，前端静默忽略
+        var writeResp = await _bridge.Dispatcher.HandleAsync(
             """{"id":10,"method":"terminal.write","params":{"sessionId":"nope","data":"x"}}""");
-        var (code, _) = ErrorOf(resp!)!.Value;
-        Assert.Equal("internal", code);
+        var (writeCode, _) = ErrorOf(writeResp!)!.Value;
+        Assert.Equal("session-gone", writeCode);
+
+        var resizeResp = await _bridge.Dispatcher.HandleAsync(
+            """{"id":11,"method":"terminal.resize","params":{"sessionId":"nope","cols":80,"rows":24}}""");
+        var (resizeCode, _) = ErrorOf(resizeResp!)!.Value;
+        Assert.Equal("session-gone", resizeCode);
     }
 
     [Fact]
     public async Task SettingsGetSave_RoundTrip()
     {
-        var getResp = await _bridge.Dispatcher.HandleAsync("""{"id":11,"method":"settings.get"}""");
+        var getResp = await _bridge.Dispatcher.HandleAsync("""{"id":12,"method":"settings.get"}""");
         var result = ResultOf(getResp!);
         Assert.True(result.GetProperty("commonDirs").GetArrayLength() > 0);
 
         var saveResp = await _bridge.Dispatcher.HandleAsync(
-            """{"id":12,"method":"settings.save","params":{"settings":{"defaultShell":"cmd","autoScanOnStartup":false,"extraScanDirs":["D:\\Tools"],"skipExitConfirm":true,"preferEmbedded":false,"maxWorkdirHistory":20}}}""");
+            """{"id":13,"method":"settings.save","params":{"settings":{"defaultShell":"cmd","autoScanOnStartup":false,"extraScanDirs":["D:\\Tools"],"skipExitConfirm":true,"preferEmbedded":false,"maxWorkdirHistory":20}}}""");
         Assert.Equal("cmd", ResultOf(saveResp!).GetProperty("settings").GetProperty("defaultShell").GetString());
         Assert.False(_store.Config.Settings.AutoScanOnStartup);
         Assert.True(_store.Config.Settings.SkipExitConfirm);
@@ -2255,8 +2861,8 @@ public class BridgeTests : IDisposable
     public async Task Workdirs_AddAndList()
     {
         await _bridge.Dispatcher.HandleAsync(
-            $$"""{"id":13,"method":"workdirs.add","params":{"path":"{{_dir.Replace("\\", "\\\\")}}"}}""");
-        var resp = await _bridge.Dispatcher.HandleAsync("""{"id":14,"method":"workdirs.list"}""");
+            $$$"""{"id":14,"method":"workdirs.add","params":{"path":"{{{_dir.Replace("\\", "\\\\")}}}"}}""");
+        var resp = await _bridge.Dispatcher.HandleAsync("""{"id":15,"method":"workdirs.list"}""");
         Assert.Equal(_dir, ResultOf(resp!)[0].GetString());
     }
 }
@@ -2299,8 +2905,12 @@ public sealed class BridgeDispatcher
     public void Emit(string eventName, object data) =>
         Outgoing?.Invoke(JsonSerializer.Serialize(new { @event = eventName, data }, Opts));
 
+    /// <remarks>宿主侧调用链在 async void 消息事件里（UI 消息循环），任何异常逃逸都会崩进程：
+    /// 入口空串兜底、method 类型校验、handler 异常封包、响应封包 try/catch，全程不抛。</remarks>
     public async Task<string?> HandleAsync(string json)
     {
+        // 宿主 TryGetWebMessageAsString 可能返回 null/空白：统一按解析失败封包
+        if (string.IsNullOrWhiteSpace(json)) return Error(null, "-32700", "请求不是合法 JSON");
         JsonElement? id = null;
         string? method = null;
         JsonElement? parameters = null;
@@ -2310,13 +2920,16 @@ public sealed class BridgeDispatcher
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object) return Error(null, "-32600", "请求必须是 JSON 对象");
             if (root.TryGetProperty("id", out var idEl)) id = idEl.Clone();
-            if (root.TryGetProperty("method", out var mEl)) method = mEl.GetString();
+            // method 非字符串（如数字）时 GetString 会抛 InvalidOperationException：按缺失处理
+            if (root.TryGetProperty("method", out var mEl))
+                method = mEl.ValueKind == JsonValueKind.String ? mEl.GetString() : null;
             if (root.TryGetProperty("params", out var pEl) && pEl.ValueKind != JsonValueKind.Null)
                 parameters = pEl.Clone();
         }
         catch (JsonException)
         {
-            return Error(id, "-32700", "请求不是合法 JSON");
+            // 解析失败时 id 必未提取，封包不含 id
+            return Error(null, "-32700", "请求不是合法 JSON");
         }
         if (string.IsNullOrEmpty(method)) return Error(id, "-32602", "缺少 method");
         if (!_handlers.TryGetValue(method!, out var handler))
@@ -2325,20 +2938,34 @@ public sealed class BridgeDispatcher
         object? result;
         try { result = await handler(parameters); }
         catch (BridgeException ex) { return Error(id, ex.Code, ex.Message); }
-        catch (Exception ex) { return Error(id, "internal", ex.Message); }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[ForgeDeck] 桥方法 {method} 失败：{ex.Message}");
+            return Error(id, "internal", ex.Message);
+        }
         if (id == null) return null;
 
-        using var ms = new MemoryStream();
-        using (var writer = new Utf8JsonWriter(ms))
+        // 响应封包必须用 Utf8JsonWriter 回写原始 id：匿名对象序列化时 default 的 JsonElement 会抛；
+        // 封包/序列化同样兜底为 internal
+        try
         {
-            writer.WriteStartObject();
-            writer.WritePropertyName("id");
-            id.Value.WriteTo(writer);
-            writer.WritePropertyName("result");
-            JsonSerializer.Serialize(writer, result, Opts);
-            writer.WriteEndObject();
+            using var ms = new MemoryStream();
+            using (var writer = new Utf8JsonWriter(ms))
+            {
+                writer.WriteStartObject();
+                writer.WritePropertyName("id");
+                id.Value.WriteTo(writer);
+                writer.WritePropertyName("result");
+                JsonSerializer.Serialize(writer, result, Opts);
+                writer.WriteEndObject();
+            }
+            return Encoding.UTF8.GetString(ms.ToArray());
         }
-        return Encoding.UTF8.GetString(ms.ToArray());
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[ForgeDeck] 桥响应封包失败（{method}）：{ex.Message}");
+            return Error(id, "internal", ex.Message);
+        }
     }
 
     private static string Error(JsonElement? id, string code, string message)
@@ -2380,9 +3007,16 @@ public sealed record CommonDir(string Name, string Path);
 public sealed record AppInfo(string Version, string UserName, DateTime? LastScanAt, LastUsedInfo? LastUsed);
 public sealed record SettingsInfo(AppSettings Settings, IReadOnlyList<CommonDir> CommonDirs, string UserName);
 
+/// <summary>业务方法接线。线程模型：handler 由宿主在 UI 线程串行调用，ConfigStore 变更无需加锁；
+/// 唯一例外 tools.rescan——扫描与合并已 Task.Run 化，且只读脱离 store 的快照、不触碰 ConfigStore，
+/// 合并结果回 UI 线程写回。终端 Output/Exited/Changed 事件来自后台线程，经 Dispatcher.Emit 透传
+/// （Emit 仅做序列化，不写共享状态）。</summary>
 public sealed class ForgeDeckBridge
 {
     public const string Version = "0.1.0";
+
+    // 反序列化复用同一 options 实例，保留 STJ 元数据缓存（WriteIndented 对反序列化无影响，可复用 Opts 风格）
+    private static readonly JsonSerializerOptions PayloadOpts = JsonOptions.Create(o => o.WriteIndented = false);
 
     private readonly ConfigStore _store;
     private readonly ToolScanner _scanner;
@@ -2412,14 +3046,18 @@ public sealed class ForgeDeckBridge
 
         Dispatcher.Register("tools.list", _ => Task.FromResult<object?>(ToolsList()));
 
-        Dispatcher.Register("tools.rescan", _ =>
+        Dispatcher.Register("tools.rescan", async _ =>
         {
-            var found = _scanner.Scan(new ScanContext(_store.Config.Settings.ExtraScanDirs));
-            var manual = _store.Config.Tools.Where(t => t.Manual).ToList();
-            _store.Config.Tools = manual.Concat(found).ToList();
+            // 快照脱离 store（后台不得触碰 ConfigStore）；扫描与合并在线程池执行——
+            // UI 线程同步扫描会冻结窗口并反压终端输出泵；合并结果在 UI 线程写回
+            var snapshot = _store.Config.Tools.Select(CloneTool).ToList();
+            var extraDirs = _store.Config.Settings.ExtraScanDirs.ToList();
+            var merged = await Task.Run(() =>
+                MergeScanResults(snapshot, _scanner.Scan(new ScanContext(extraDirs))));
+            _store.Config.Tools = merged;
             _store.Config.LastScanAt = DateTime.UtcNow;
             _store.Save();
-            return Task.FromResult<object?>(ToolsList());
+            return ToolsList();
         });
 
         Dispatcher.Register("tools.addManual", p =>
@@ -2449,7 +3087,7 @@ public sealed class ForgeDeckBridge
 
         Dispatcher.Register("profiles.save", p =>
         {
-            var profile = p?.GetProperty("profile").Deserialize<LaunchProfile>(JsonOptions.Create(o => o.WriteIndented = false))
+            var profile = p?.GetProperty("profile").Deserialize<LaunchProfile>(PayloadOpts)
                 ?? throw new BridgeException("validation", "无效的配置");
             _store.Config.Profiles.RemoveAll(x => x.Id == profile.Id || x.ToolId == profile.ToolId);
             _store.Config.Profiles.Add(profile);
@@ -2470,7 +3108,7 @@ public sealed class ForgeDeckBridge
 
         Dispatcher.Register("settings.save", p =>
         {
-            var settings = p?.GetProperty("settings").Deserialize<AppSettings>(JsonOptions.Create(o => o.WriteIndented = false))
+            var settings = p?.GetProperty("settings").Deserialize<AppSettings>(PayloadOpts)
                 ?? throw new BridgeException("validation", "无效的设置");
             _store.Config.Settings = settings;
             _store.Save();
@@ -2513,7 +3151,9 @@ public sealed class ForgeDeckBridge
             {
                 "pwsh" => (PathSearch.FindOnPath("pwsh")
                            ?? throw new BridgeException("not_found", "未找到 pwsh，请在设置中改用 powershell 或 cmd"), "pwsh"),
-                "powershell" => (PathSearch.FindOnPath("powershell") ?? "powershell.exe", "PowerShell"),
+                // powershell 分支复用 LaunchService 三级回退的第二、三级：PATH 上的 powershell → System32 全路径
+                "powershell" => (PathSearch.FindOnPath("powershell")
+                                 ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "powershell.exe"), "PowerShell"),
                 _ => (Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe"), "cmd"),
             };
             var (cols, rows) = Size(p);
@@ -2525,14 +3165,33 @@ public sealed class ForgeDeckBridge
 
         Dispatcher.Register("terminal.write", p =>
         {
-            _terminal.Write(p?.GetProperty("sessionId").GetString() ?? "", p?.GetProperty("data").GetString() ?? "");
+            // 参数提取在 try 外：畸形请求（缺属性）应报 internal，不得误标 session-gone
+            var sessionId = p?.GetProperty("sessionId").GetString() ?? "";
+            var data = p?.GetProperty("data").GetString() ?? "";
+            try
+            {
+                _terminal.Write(sessionId, data);
+            }
+            catch (KeyNotFoundException)
+            {
+                // 关标签瞬间在途 write 是良性竞态：session-gone 供前端静默忽略，不弹错误
+                throw new BridgeException("session-gone", "会话已关闭");
+            }
             return Task.FromResult<object?>(null);
         });
 
         Dispatcher.Register("terminal.resize", p =>
         {
-            _terminal.Resize(p?.GetProperty("sessionId").GetString() ?? "",
-                p?.GetProperty("cols").GetInt32() ?? 80, p?.GetProperty("rows").GetInt32() ?? 24);
+            var sessionId = p?.GetProperty("sessionId").GetString() ?? "";
+            var (cols, rows) = Size(p);
+            try
+            {
+                _terminal.Resize(sessionId, cols, rows);
+            }
+            catch (KeyNotFoundException)
+            {
+                throw new BridgeException("session-gone", "会话已关闭");
+            }
             return Task.FromResult<object?>(null);
         });
 
@@ -2567,6 +3226,47 @@ public sealed class ForgeDeckBridge
             _store.Config.Profiles.FirstOrDefault(p => p.ToolId == t.Id)?.OpenMode
                 ?? (_store.Config.Settings.PreferEmbedded ? OpenMode.Embedded : OpenMode.External)))
         .ToList();
+
+    /// <summary>重扫合并：按 ExePath（OrdinalIgnoreCase）复用旧条目，保留 Id 与 Manual 标记——
+    /// 否则每次重扫重铸 Id，profile/lastUsed 会静默失联（autoScanOnStartup=true 时每次启动都被重置）。
+    /// 复用条目刷新展示字段（Name/Type/Source/Builtin），新路径才铸造新条目；
+    /// 非手动且未被扫到的旧条目随重扫淘汰（扫描是来源的事实来源）。仅触碰快照，不改 ConfigStore。</summary>
+    private static List<ToolInfo> MergeScanResults(List<ToolInfo> oldTools, List<ToolInfo> found)
+    {
+        var oldByPath = new Dictionary<string, ToolInfo>(StringComparer.OrdinalIgnoreCase);
+        foreach (var old in oldTools)
+            oldByPath[Path.GetFullPath(old.ExePath)] = old;
+
+        var result = oldTools.Where(t => t.Manual).ToList();
+        foreach (var fresh in found)
+        {
+            var path = Path.GetFullPath(fresh.ExePath);
+            if (oldByPath.TryGetValue(path, out var existing))
+            {
+                existing.Name = fresh.Name;
+                existing.Type = fresh.Type;
+                existing.Source = fresh.Source;
+                existing.Builtin = fresh.Builtin;
+                if (!existing.Manual) result.Add(existing);
+            }
+            else
+            {
+                result.Add(fresh);
+            }
+        }
+        return result;
+    }
+
+    private static ToolInfo CloneTool(ToolInfo t) => new()
+    {
+        Id = t.Id,
+        Name = t.Name,
+        Type = t.Type,
+        ExePath = t.ExePath,
+        Source = t.Source,
+        Builtin = t.Builtin,
+        Manual = t.Manual,
+    };
 
     private LaunchProfile ResolveProfile(string toolId, JsonElement? p)
     {
@@ -2625,7 +3325,7 @@ public sealed class ForgeDeckBridge
 
 - [ ] **步骤 3：运行测试验证通过**
 
-运行：`dotnet test --filter BridgeTests` → 预期 11 Passed。
+运行：`dotnet test --filter BridgeTests` → 预期 14 Passed。
 再跑全量：`dotnet test` → 预期全部 Passed。
 
 - [ ] **步骤 4：Commit**
@@ -2634,6 +3334,28 @@ public sealed class ForgeDeckBridge
 git add src/ForgeDeck.Core tests/ForgeDeck.Core.Tests
 git commit -m "feat(core): 消息桥——JSON 分发器与全部业务方法"
 ```
+
+### 审查修正（实现后回填，代码块已同步为最终版本）
+
+1. **测试类释放终端**：`BridgeTests` 将 `TerminalSessionManager` 存为字段，`Dispose` 里先 `_terminal.Dispose()` 再删临时目录——`TerminalCreate_WithCmdTool` 会 spawn 真实进程，不释放会泄漏。
+2. **session-gone 错误码**：`terminal.write`/`terminal.resize` 把 `KeyNotFoundException` 转为 `BridgeException("session-gone", "会话已关闭")`。关标签瞬间在途 write 是良性竞态，前端静默忽略该码不弹错误。测试相应改为 `TerminalWrite_UnknownSession_ReturnsSessionGone`（同时覆盖 resize），替代原断言 "internal" 的版本。
+3. **createShell 的 powershell 分支**：与任务 8 的宿主解析统一，回退链改为 `PATH 上的 powershell → System32 全路径`（原计划回退到裸 `"powershell.exe"`，工作目录不在 PATH 时会启动失败）。
+4. **计划代码两处笔误修复**（TDD 红灯阶段暴露）：
+   - 测试里 `$$"""` 内插原始字符串中 JSON 结尾的 `}}` 与内插闭合定界符冲突（CS9007），三处改为 `$$$"""` + `{{{ }}}`；
+   - `ResultOf` 在 `using` 释放文档后返回的 `JsonElement` 不可再访问（`ObjectDisposedException`），返回前需 `Clone()`。
+5. **-32700 封包**：JSON 解析失败时 `id` 必未提取，错误封包显式用 `Error(null, ...)`（不含 id），与协议一致。
+6. 组合根顺序（任务 11 接线参考）：KnownDirs → Path → Registry → StartMenu → ExtraDirs。
+
+### 二次审查修正（健壮性，代码块已同步为最终版本）
+
+1. **HandleAsync 异常逃逸口封死**（宿主 async void 消息链上逃逸会崩进程）：入口空串/null 兜底为 -32700（`TryGetWebMessageAsString` 可能返回 null）；`method` 非 JSON 字符串时按缺失处理（-32602），不再让 `GetString()` 抛 `InvalidOperationException`；成功响应的 Utf8JsonWriter 封包段也包 try/catch 兜底为 internal。测试 `HandleAsync_NullBodyOrNonStringMethod_ReturnsErrorNotThrow`。
+2. **tools.rescan 异步化**：handler 改 async，扫描与合并包 `await Task.Run`——UI 线程同步扫描会冻结窗口并反压终端输出泵；后台只读脱离 store 的快照（`CloneTool`），不触碰 ConfigStore，合并结果回 UI 线程写回。
+3. **重扫按 ExePath 复用工具条目**：`MergeScanResults` 按 `ExePath`（OrdinalIgnoreCase）命中旧条目即复用（Id/Manual 保留），仅刷新展示字段；新路径才铸造新 Id。否则每次重扫（含 autoScanOnStartup）重铸 Id，profile/lastUsed 静默失联。测试 `Rescan_ReusesToolByPath_PreservesIdProfileAndLastUsed`。
+4. **补核心价值测试**：`TerminalCreate_WithCmdTool` 订阅 `Dispatcher.Outgoing` + TaskCompletionSource，断言 2s 内收到含该 sessionId 的 `terminal.data` 事件封包；`LaunchExternal_CmdExitZero_ReturnsPidAndRecordsUsage`（cmd.exe `/c exit 0`）断言 pid>0 且 LastUsed 更新。
+5. **write/resize 参数提取移出 try**：畸形请求（缺属性）报 internal，不误标 session-gone；resize 的 cols/rows 复用 `Size()` helper（消除死代码 `GetInt32() ?? 80`）。
+6. **PayloadOpts 静态只读实例**：profiles.save/settings.save 反序列化复用同一 options，保留 STJ 元数据缓存。
+7. **internal 错误落日志**：dispatcher 的 handler 异常与封包异常均 `Console.Error.WriteLine`（与 ToolScanner 一致）。
+8. **线程模型固化**：ForgeDeckBridge 类头注释说明 handler 默认 UI 线程串行、rescan 后台化不触碰 ConfigStore、终端事件经 Emit 透传无共享状态写入。
 
 ---
 
@@ -2694,6 +3416,7 @@ public partial class MainWindow : Window
                 new PathScanSource(),
                 new RegistryScanSource(new RegistryUninstallRegistry()),
                 new StartMenuScanSource(new WScriptShellLinkResolver()),
+                new ExtraDirsScanSource(),   // 规格 §4.1 数据源 #6：附加目录，最低优先级
             }),
             _terminal);
         _bridge.Dispatcher.Outgoing += Post;
@@ -2775,11 +3498,11 @@ git commit -m "feat(app): WebView2 宿主——消息桥接线/开发模式导�
 
 **文件：**
 - 创建：`ui/src/TerminalPanel.tsx`
-- 修改：`ui/src/App.tsx`
+- 修改：`ui/src/App.tsx`、`ui/src/bridge.ts`（Mock 两处保真度修复）
 
-- [ ] **步骤 1：TerminalPanel 组件**
+- [x] **步骤 1：TerminalPanel 组件**
 
-`ui/src/TerminalPanel.tsx`：
+`ui/src/TerminalPanel.tsx`（最终实现；oklch 主题经 Chromium 151 家族真机渲染验证通过，保留 oklch，十六进制近似值留注释备用——xterm v6 默认 DOM 渲染器走 CSS 颜色，原生支持 oklch。含二审修复：早到分块缓冲 pendingChunks，createShell 响应→refreshSessions 往返→effect 建实例窗口期内到达的 terminal.data 先缓存、实例创建后按序 flush，避免快速输出工具丢首块）：
 
 ```tsx
 import { useEffect, useRef } from 'react';
@@ -2789,6 +3512,8 @@ import '@xterm/xterm/css/xterm.css';
 import { bridge } from './bridge';
 import type { TerminalSessionInfo } from './types';
 
+// 若 xterm canvas 渲染不支持 oklch（表现为黑底/默认色），换成十六进制近似值：
+// background '#0d1211'、foreground '#b8c4bf'、cursor '#8fe3b0'、cursorAccent '#0d1211'
 const THEME = {
   background: 'oklch(13% 0.02 170)',
   foreground: 'oklch(78% 0.02 170)',
@@ -2804,12 +3529,19 @@ export function TerminalPanel({ sessions, activeId, onActivate, onNewSession, on
   onNewSession: () => void;
   onCloseSession: (id: string) => void;
 }) {
-  const terms = useRef(new Map<string, { term: Terminal; fit: FitAddon; container: HTMLDivElement }>());
+  const terms = useRef(new Map<string, { term: Terminal; fit: FitAddon }>());
   const containers = useRef(new Map<string, HTMLDivElement>());
   const observers = useRef(new Map<string, ResizeObserver>());
+  // 早到分块缓冲：createShell 响应→refreshSessions 往返→effect 建实例之间存在窗口，
+  // 此期间到达的 terminal.data 先缓存，实例创建后按序 flush，避免丢失首块输出。
+  const pendingChunks = useRef(new Map<string, string[]>());
 
   useEffect(() => bridge.on('terminal.data', ({ sessionId, chunk }: any) => {
-    terms.current.get(sessionId)?.term.write(chunk);
+    const entry = terms.current.get(sessionId);
+    if (entry) { entry.term.write(chunk); return; }
+    const buf = pendingChunks.current.get(sessionId);
+    if (buf) buf.push(chunk);
+    else pendingChunks.current.set(sessionId, [chunk]);
   }), []);
 
   useEffect(() => {
@@ -2820,6 +3552,7 @@ export function TerminalPanel({ sessions, activeId, onActivate, onNewSession, on
         observers.current.delete(id);
         terms.current.delete(id);
         containers.current.delete(id);
+        pendingChunks.current.delete(id);
       }
     for (const session of sessions) {
       const id = session.sessionId;
@@ -2836,21 +3569,28 @@ export function TerminalPanel({ sessions, activeId, onActivate, onNewSession, on
       term.open(container);
       try { fit.fit(); } catch { /* 容器尺寸为 0 时忽略 */ }
       bridge.request('terminal.resize', { sessionId: id, cols: term.cols, rows: term.rows }).catch(() => {});
-      term.onData((data) => bridge.request('terminal.write', { sessionId: id, data }).catch(() => {}));
+      term.onData((data) => bridge.request('terminal.write', { sessionId: id, data }).catch(() => {
+        // session-gone：关标签瞬间的在途写入是良性竞态，静默忽略
+      }));
       const observer = new ResizeObserver(() => {
         if (container.offsetParent === null) return;
         try { fit.fit(); } catch { return; }
         bridge.request('terminal.resize', { sessionId: id, cols: term.cols, rows: term.rows }).catch(() => {});
       });
       observer.observe(container);
-      terms.current.set(id, { term, fit, container });
+      const buffered = pendingChunks.current.get(id);
+      if (buffered) {
+        for (const chunk of buffered) term.write(chunk);
+        pendingChunks.current.delete(id);
+      }
+      terms.current.set(id, { term, fit });
       observers.current.set(id, observer);
     }
   }, [sessions]);
 
   useEffect(() => {
     const entry = activeId ? terms.current.get(activeId) : null;
-    if (entry && entry.container.offsetParent !== null)
+    if (entry && entry.fit)
       requestAnimationFrame(() => { try { entry.fit.fit(); } catch { /* 忽略 */ } });
   }, [activeId, sessions]);
 
@@ -2879,11 +3619,9 @@ export function TerminalPanel({ sessions, activeId, onActivate, onNewSession, on
 }
 ```
 
-- [ ] **步骤 2：App 接入会话状态**
+- [x] **步骤 2：App 接入会话状态**
 
-`ui/src/App.tsx` 中（在任务 3 的壳基础上增量修改）：
-
-新增 import 与状态：
+`ui/src/App.tsx` 新增 import：
 
 ```tsx
 import { useCallback, useEffect, useState } from 'react';
@@ -2892,28 +3630,31 @@ import { TerminalPanel } from './TerminalPanel';
 import type { TerminalSessionInfo } from './types';
 ```
 
-组件体内：
+组件体内新增状态与处理（最终实现。注意：**不要**用独立的自动选中 effect——`handleNewShell` 的 `setActiveSessionId(newId)` 提交时 sessions 还是旧列表（refreshSessions 往返未完成），effect 会误判 newId 失效而回退到旧首标签，导致新建第 2+ 个标签不再自动激活。失效校正统一放在数据到达期，用函数式 setState 原子判定：初始选首个、关激活标签选剩余首个、全关归 null、新建保留显式 set）：
 
 ```tsx
 const [sessions, setSessions] = useState<TerminalSessionInfo[]>([]);
 const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
 
 const refreshSessions = useCallback(async () => {
-  setSessions(await bridge.request<TerminalSessionInfo[]>('sessions.list'));
+  const list = await bridge.request<TerminalSessionInfo[]>('sessions.list');
+  setSessions(list);
+  // 数据到达期一并校正激活：cur 仍有效则保留（新建标签的显式 set 不被旧列表回退），失效则选剩余首个，全关归 null
+  setActiveSessionId((cur) => (cur && list.some((s) => s.sessionId === cur) ? cur : list[0]?.sessionId ?? null));
 }, []);
 
-useEffect(() => bridge.on('sessions.changed', () => { refreshSessions(); }), [refreshSessions]);
+useEffect(() => { refreshSessions(); }, [refreshSessions]);
 
-useEffect(() => {
-  if (activeSessionId == null && sessions.length > 0) setActiveSessionId(sessions[0].sessionId);
-}, [sessions, activeSessionId]);
+useEffect(() => bridge.on('sessions.changed', () => { refreshSessions(); }), [refreshSessions]);
 
 const handleNewShell = useCallback(async () => {
   try {
     const { sessionId } = await bridge.request<{ sessionId: string }>('terminal.createShell', { cols: 120, rows: 30 });
     setActiveSessionId(sessionId);
     await refreshSessions();
-  } catch (e: any) { console.error(e); } // Toast 在任务 16 接入
+  } catch (e) {
+    console.error('新建会话失败', e); // Toast 在任务 16 接入
+  }
 }, [refreshSessions]);
 
 const handleCloseSession = useCallback(async (id: string) => {
@@ -2922,30 +3663,35 @@ const handleCloseSession = useCallback(async (id: string) => {
 }, [refreshSessions]);
 ```
 
-把任务 3 的终端占位 `<section className="terminal">…</section>` 替换为：
+终端占位 `<section className="terminal">…</section>` 替换为：
 
 ```tsx
 <TerminalPanel sessions={sessions} activeId={activeSessionId}
   onActivate={setActiveSessionId} onNewSession={handleNewShell} onCloseSession={handleCloseSession} />
 ```
 
-并在启动 effect 里加 `refreshSessions()`（任务 13 会统一整理启动加载）。
+附带修复（`ui/src/bridge.ts` MockBridge 两处保真度问题）：
+1. `sessions.list` 原返回内部数组的同一引用，React `setSessions` 因引用相同跳过重渲染、`[sessions]` effect 依赖不触发（真实桥每次返回新 JSON 数组，不受影响）。改为 `return [...this.sessions]; // 真实桥每次返回新 JSON 数组；副本保证 React 依赖比较生效`。
+2. `mockOutput` 首块从 300ms 改为 0ms 立即发射：模拟真实 ConPTY 在 createShell 响应与 sessions 列表往返之前就开始输出，使浏览器调试能真实考验 TerminalPanel 的早到分块缓冲（`i === 0 ? 0 : 300`）。
 
-- [ ] **步骤 3：构建与真机联调验证**
+- [x] **步骤 3：构建与验证**
 
-运行：`cd ui && npm run build` → `✓ built`。
-联调（`npm run dev` + `FORGEDECK_DEV=1 dotnet run --project src/ForgeDeck.App`）：
-1. 点终端区 `+` 新建标签 → 出现 pwsh/cmd 提示符（真实 ConPTY）。
-2. 敲 `echo forge-e2e` 回车 → 输出回显。
-3. 拖动窗口宽度 → 终端随宽重排（FitAddon + resize）。
-4. 点标签 `×` → 标签与实例销毁。
-5. 关闭应用窗口 → 若有运行中会话弹确认框。
+1. `cd ui && npm run build` → `✓ built`（xterm 体积触发 >500kB chunk 提示，属预期告警）；`npm run lint` 0 警告 0 错误；`dotnet test` 76/76 绿。
+2. WebView2 真机联调在本机受阻（环境问题，非代码问题）：msedgewebview2 浏览器进程在任何用户态应用下都无法派生（独立 WinForms+WebView2 最小复现确认，`CreateCoreWebView2ControllerAsync` 永久挂起、零子进程；同机 SearchHost/GameViewer 等系统级 WebView2 实例正常；headless msedge 本身可运行）。已尝试：--proxy-server=direct（旁路系统代理 127.0.0.1:10808 对 localhost 的劫持）、vite 绑定 127.0.0.1（原仅 ::1）、WMI/计划任务脱离进程树启动，均无法绕过。后端 ConPTY 全链已由 76 个单测覆盖。
+3. 改用 headless Edge（Chromium 151 家族，与 WebView2 151 同引擎）+ CDP 驱动 vite dev server（MockBridge）完成 UI 真机验证：
+   - 连点两次 `+` → 第二个标签立即且稳定保持激活（时序回归修复验证）；慢速开第三个同样自动激活；
+   - 两标签的 xterm 文本均完整含首行 mock 输出（0ms 首块早于实例创建，缓冲不丢数据验证）；
+   - 点 × 关闭激活标签 → 自动重选剩余首个，标签与 term-body 实例销毁、无残留 DOM；
+   - 视口 754→900→1600 宽三档 → xterm 行宽随容器等比变化（fit 重排生效）；全部关闭 → 空态正常；
+   - 全程 console 无 error、无未捕获异常；oklch 主题实际渲染为深绿黑底 + 浅绿白字，与设计稿协调，无黑块/默认色异常——**最终保留 oklch**。
+   - pwsh 真实提示符/echo 回显路径未能在 WebView2 内直测（见 2），该链路由后端单测覆盖，待环境修复后补一次人工冒烟。
 
-- [ ] **步骤 4：Commit**
+- [x] **步骤 4：Commit**
 
 ```bash
-git add ui/src
-git commit -m "feat(ui): 内嵌终端面板——xterm 多会话/自适应尺寸/输入输出流"
+cd /c/workspace/ForgeDeck && git add ui/src && git commit -m "feat(ui): 内嵌终端面板——xterm 多会话/自适应尺寸/输入输出流"
+# 二审修复（激活时序回归 + 早到输出缓冲）：
+git commit -m "fix(ui): 会话激活时序回归与早到输出缓冲"
 ```
 
 ---
@@ -2956,7 +3702,7 @@ git commit -m "feat(ui): 内嵌终端面板——xterm 多会话/自适应尺寸
 - 创建：`ui/src/LauncherView.tsx`、`ui/src/ToolListPanel.tsx`、`ui/src/Modal.tsx`、`ui/src/AddToolModal.tsx`、`ui/src/lib/format.ts`
 - 修改：`ui/src/App.tsx`（本任务引入数据加载主线，替换 launcher 占位）
 
-- [ ] **步骤 1：工具函数**
+- [x] **步骤 1：工具函数**
 
 `ui/src/lib/format.ts`：
 
@@ -2978,7 +3724,7 @@ export function baseName(path: string): string {
 }
 ```
 
-- [ ] **步骤 2：Modal 基座（含 Esc/关闭动画）**
+- [x] **步骤 2：Modal 基座（含 Esc/关闭动画）**
 
 `ui/src/Modal.tsx`：
 
@@ -3019,7 +3765,7 @@ export function Modal({ open, onClose, title, subtitle, wide, children }: {
 }
 ```
 
-- [ ] **步骤 3：AddToolModal**
+- [x] **步骤 3：AddToolModal**
 
 `ui/src/AddToolModal.tsx`：
 
@@ -3065,7 +3811,7 @@ export function AddToolModal({ open, onClose, onConfirm }: {
 }
 ```
 
-- [ ] **步骤 4：ToolListPanel**
+- [x] **步骤 4：ToolListPanel**
 
 `ui/src/ToolListPanel.tsx`：
 
@@ -3119,7 +3865,7 @@ export function ToolListPanel({ tools, scanning, selectedToolId, onSelect, onRes
 }
 ```
 
-- [ ] **步骤 5：LauncherView（指标区 + 双栏骨架）**
+- [x] **步骤 5：LauncherView（指标区 + 双栏骨架）**
 
 `ui/src/LauncherView.tsx`（右侧配置面板任务 14 再放，本任务先渲染占位面板保持布局完整）：
 
@@ -3178,9 +3924,17 @@ export function LauncherView({ tools, scanning, selectedToolId, sessions, appInf
 }
 ```
 
-- [ ] **步骤 6：App 接入数据主线**
+- [x] **步骤 6：App 接入数据主线**
 
-`ui/src/App.tsx` 更新（关键增量；与任务 12 的会话代码合并后的完整形态）：
+`ui/src/App.tsx` 更新（关键增量；与任务 12 的会话代码合并后的完整形态）。
+
+**实现时修正（相对下文初稿，最终代码块已同步为实际实现）：**
+
+1. `refreshSessions` 保留任务 12 的实现（含 activeId 校正逻辑），不回退为初稿的简单版本；因此初稿里多余的 `useEffect(activeSessionId == null → 选首个)` 补正 effect 删除——任务 12 的 refreshSessions 已在数据到达时校正。
+2. 任务 12 的 `useEffect(() => { refreshSessions(); })` 与 `useEffect(() => bridge.on('sessions.changed', ...))` 并入本步骤的单一启动 effect（订阅在 effect 体内同步注册，异步加载期间的 sessions.changed 事件不丢），避免启动期重复请求。
+3. `handleNewShell` 保留任务 12 引入的 try/catch + console.error（任务 16 换 Toast）。
+4. `workdirs`/`profile` 的值在本任务尚无读取方（任务 14 的 FolderPicker/ConfigPanel 才读），strict + noUnusedLocals/oxlint no-unused-vars 会报错——暂以 `_workdirs`/`_profile` 命名豁免并加注释，任务 14 恢复具名读取。
+5. rescan 分支内层 `setAppInfo(…)` 增加 `if (!disposed)` 守卫；`finally` 复位 scanning 覆盖失败/卸载路径。
 
 ```tsx
 import { useCallback, useEffect, useState } from 'react';
@@ -3200,15 +3954,19 @@ export default function App() {
   const [sessions, setSessions] = useState<TerminalSessionInfo[]>([]);
   const [settingsInfo, setSettingsInfo] = useState<SettingsInfo | null>(null);
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null);
-  const [workdirs, setWorkdirs] = useState<string[]>([]);
+  // 值自任务 14（FolderPicker 读 workdirs、ConfigPanel 以 profile.id 作重置依赖）起被读取，暂以 _ 前缀豁免未用检查
+  const [_workdirs, setWorkdirs] = useState<string[]>([]);
   const [selectedToolId, setSelectedToolId] = useState<string | null>(null);
-  const [profile, setProfile] = useState<LaunchProfile | null>(null);
+  const [_profile, setProfile] = useState<LaunchProfile | null>(null);
   const [scanning, setScanning] = useState(false);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
 
   const refreshSessions = useCallback(async () => {
-    setSessions(await bridge.request<TerminalSessionInfo[]>('sessions.list'));
+    const list = await bridge.request<TerminalSessionInfo[]>('sessions.list');
+    setSessions(list);
+    // 数据到达期一并校正激活：cur 仍有效则保留（新建标签的显式 set 不被旧列表回退），失效则选剩余首个，全关归 null
+    setActiveSessionId((cur) => (cur && list.some((s) => s.sessionId === cur) ? cur : list[0]?.sessionId ?? null));
   }, []);
   const refreshWorkdirs = useCallback(async () => {
     setWorkdirs(await bridge.request<string[]>('workdirs.list'));
@@ -3219,6 +3977,7 @@ export default function App() {
     setProfile(await bridge.request<LaunchProfile>('profiles.get', { toolId }));
   }, []);
 
+  // 启动主线（合并任务 12 的会话初始拉取与订阅，避免重复请求）：appInfo/settings → 按设置决定 rescan 或 list → 会话/工作目录 → 选中 preferred 工具
   useEffect(() => {
     let disposed = false;
     (async () => {
@@ -3234,8 +3993,8 @@ export default function App() {
         setScanning(true);
         try {
           list = await bridge.request<ToolListItem[]>('tools.rescan');
-          setAppInfo(await bridge.request<AppInfo>('app.info'));
-        } finally { setScanning(false); }
+          if (!disposed) setAppInfo(await bridge.request<AppInfo>('app.info'));
+        } finally { setScanning(false); } // 失败/卸载均复位扫描态
       } else {
         list = await bridge.request<ToolListItem[]>('tools.list');
       }
@@ -3249,10 +4008,6 @@ export default function App() {
     const off = bridge.on('sessions.changed', () => { refreshSessions(); });
     return () => { disposed = true; off(); };
   }, [refreshSessions, refreshWorkdirs, selectTool]);
-
-  useEffect(() => {
-    if (activeSessionId == null && sessions.length > 0) setActiveSessionId(sessions[0].sessionId);
-  }, [sessions, activeSessionId]);
 
   const handleRescan = useCallback(async () => {
     setScanning(true);
@@ -3269,9 +4024,13 @@ export default function App() {
   }, []);
 
   const handleNewShell = useCallback(async () => {
-    const { sessionId } = await bridge.request<{ sessionId: string }>('terminal.createShell', { cols: 120, rows: 30 });
-    setActiveSessionId(sessionId);
-    await refreshSessions();
+    try {
+      const { sessionId } = await bridge.request<{ sessionId: string }>('terminal.createShell', { cols: 120, rows: 30 });
+      setActiveSessionId(sessionId);
+      await refreshSessions();
+    } catch (e) {
+      console.error('新建会话失败', e); // Toast 在任务 16 接入
+    }
   }, [refreshSessions]);
 
   const handleCloseSession = useCallback(async (id: string) => {
@@ -3322,12 +4081,12 @@ export default function App() {
 }
 ```
 
-- [ ] **步骤 7：构建与联调验证**
+- [x] **步骤 7：构建与联调验证**
 
 运行：`cd ui && npm run build` → `✓ built`。
 联调验证：启动后自动扫描（真实机器应识别出本机已装的已知工具）；三个指标卡显示真实数据；点"手动添加工具"填一个不存在的路径 → 弹窗内显示错误；填 `C:\Windows\System32\cmd.exe` 名称 `Cmd 手动` → 列表新增；顶栏刷新按钮触发重扫。
 
-- [ ] **步骤 8：Commit**
+- [x] **步骤 8：Commit**
 
 ```bash
 git add ui/src
@@ -3342,7 +4101,13 @@ git commit -m "feat(ui): 快速启动页——指标/工具列表/扫描/手动�
 - 创建：`ui/src/ConfigPanel.tsx`、`ui/src/WorkdirControl.tsx`、`ui/src/FolderPickerModal.tsx`、`ui/src/Switch.tsx`、`ui/src/lib/env.ts`
 - 修改：`ui/src/App.tsx`（替换占位 configPanel、接启动/保存流程）
 
-- [ ] **步骤 1：env 文本解析**
+> **修正项（相对本计划初稿，源于任务 12/13 审查演进）：**
+> 1. App.tsx 里任务 13 暂以 `_workdirs`/`_profile` 命名豁免的值恢复具名使用（workdirs 传 ConfigPanel 与 FolderPickerModal、profile 传 ConfigPanel）。
+> 2. selectTool 竞态防护（任务 13 审查 Minor 3）：`latestToolIdRef` 记录最近请求的 toolId，`profiles.get` 响应经 `setProfile((cur) => ref === p.toolId ? p : cur)` 校验，快速连点时过期 profile 被丢弃。`handleSaveProfile` 的保存响应同样按 id 校验（同类竞态：保存后立即切工具）。
+> 3. ConfigPanel 草稿复位 effect 依赖 `[profile.id]`（按值依赖会在保存回写时清掉用户正在编辑的草稿），oxlint exhaustive-deps 警告以 eslint-disable 块注释豁免；workdir 单独 effect 依赖扩展为 `[profile.id, profile.workdir]`——含 id 是因为工具切换时两个 profile 的 workdir 值可能相同（如均为空），仅依赖值会保留上一工具的未保存草稿（串档）。
+> 4. 嵌入式启动后 `setActiveSessionId(sessionId)`：任务 12 的 refreshSessions 函数式校正不会覆盖列表中仍存在的 cur，新标签稳定激活。
+
+- [x] **步骤 1：env 文本解析**
 
 `ui/src/lib/env.ts`：
 
@@ -3364,7 +4129,7 @@ export function stringifyEnv(env: Record<string, string>): string {
 }
 ```
 
-- [ ] **步骤 2：Switch 与 WorkdirControl**
+- [x] **步骤 2：Switch 与 WorkdirControl**
 
 `ui/src/Switch.tsx`：
 
@@ -3428,7 +4193,7 @@ export function WorkdirControl({ value, recent, onChange, onBrowse }: {
 }
 ```
 
-- [ ] **步骤 3：FolderPickerModal**
+- [x] **步骤 3：FolderPickerModal**
 
 `ui/src/FolderPickerModal.tsx`：
 
@@ -3484,7 +4249,7 @@ export function FolderPickerModal({ open, initialValue, commonDirs, workdirs, on
 }
 ```
 
-- [ ] **步骤 4：ConfigPanel**
+- [x] **步骤 4：ConfigPanel**
 
 `ui/src/ConfigPanel.tsx`：
 
@@ -3510,15 +4275,20 @@ export function ConfigPanel({ tool, profile, workdirs, onSave, onLaunch, onBrows
   const [openMode, setOpenMode] = useState<OpenMode>(profile.openMode);
   const [savedFlash, setSavedFlash] = useState(false);
 
+  // 切换 profile（id 变化）时复位本地草稿；保存回写不换 id，草稿得以保留——其余字段为有意忽略。
+  // 按计划依赖 [profile.id]，exhaustive-deps 警告在此禁用（oxlint 兼容 eslint-disable 注释）。
+  /* eslint-disable react-hooks/exhaustive-deps */
   useEffect(() => {
     setArgs(profile.args);
     setEnvText(stringifyEnv(profile.env));
     setAutoRestore(profile.autoRestore);
     setOpenMode(profile.openMode);
   }, [profile.id]);
+  /* eslint-enable react-hooks/exhaustive-deps */
 
-  // 工作目录单独跟随：文件夹选择弹窗直接更新 App 层 profile，需要立即回显
-  useEffect(() => setWorkdir(profile.workdir), [profile.workdir]);
+  // 工作目录单独跟随：文件夹选择弹窗直接更新 App 层 profile，需要立即回显。
+  // 依赖含 profile.id：工具切换时即使两个 profile 的 workdir 值相同（如均为空）也必须复位，避免草稿串档
+  useEffect(() => setWorkdir(profile.workdir), [profile.id, profile.workdir]);
 
   const current = (): LaunchProfile => ({
     ...profile, args, workdir, env: parseEnvText(envText), autoRestore, openMode,
@@ -3589,9 +4359,9 @@ export function ConfigPanel({ tool, profile, workdirs, onSave, onLaunch, onBrows
 }
 ```
 
-- [ ] **步骤 5：App 接入配置面板与启动流程**
+- [x] **步骤 5：App 接入配置面板与启动流程**
 
-`ui/src/App.tsx`：新增 import（`ConfigPanel`、`FolderPickerModal`）、状态 `const [pickerOpen, setPickerOpen] = useState(false);`，替换任务 13 的 configPanel 占位：
+`ui/src/App.tsx`：新增 import（`ConfigPanel`、`FolderPickerModal`）与 `useRef`；任务 13 的 `_workdirs`/`_profile` 恢复具名（`workdirs`/`profile`）；新增状态 `const [pickerOpen, setPickerOpen] = useState(false);`；替换任务 13 的 configPanel 占位：
 
 ```tsx
 configPanel={selectedTool && profile ? (
@@ -3608,11 +4378,23 @@ configPanel={selectedTool && profile ? (
 )}
 ```
 
-新增处理函数：
+新增/修改处理函数（selectTool 加竞态防护，见任务头部修正项 2/4）：
 
 ```tsx
+// 竞态防护：快速连点工具时 profiles.get 响应可能乱序到达，回调式校验丢弃非最新请求的过期 profile
+const latestToolIdRef = useRef<string | null>(null);
+
+const selectTool = useCallback(async (toolId: string) => {
+  latestToolIdRef.current = toolId;
+  setSelectedToolId(toolId);
+  const p = await bridge.request<LaunchProfile>('profiles.get', { toolId });
+  setProfile((cur) => (latestToolIdRef.current === p.toolId ? p : cur));
+}, []);
+
 const handleSaveProfile = useCallback(async (p: LaunchProfile) => {
-  setProfile(await bridge.request<LaunchProfile>('profiles.save', { profile: p }));
+  const saved = await bridge.request<LaunchProfile>('profiles.save', { profile: p });
+  // 同 selectTool 的竞态防护：保存响应晚于工具切换到达时（cur 已是其他工具）丢弃，避免覆盖新选中项
+  setProfile((cur) => (cur && cur.id === saved.id ? saved : cur));
 }, []);
 
 const handleLaunch = useCallback(async (p: LaunchProfile) => {
@@ -3623,14 +4405,14 @@ const handleLaunch = useCallback(async (p: LaunchProfile) => {
     if (p.openMode === 'embedded') {
       const { sessionId } = await bridge.request<{ sessionId: string }>('terminal.create',
         { toolId: p.toolId, profileId: p.id, cols: 120, rows: 30 });
-      setActiveSessionId(sessionId);
+      setActiveSessionId(sessionId); // 显式激活新标签；refreshSessions 的函数式校正不会覆盖仍在列表中的 cur
       await refreshSessions();
     } else {
       await bridge.request('launch.external', { toolId: p.toolId, profileId: p.id });
     }
     setAppInfo(await bridge.request<AppInfo>('app.info'));
     await refreshWorkdirs();
-  } catch (e: any) { console.error('启动失败', e); } // Toast 在任务 16 接入
+  } catch (e) { console.error('启动失败', e); } // Toast 在任务 16 接入
 }, [tools, refreshSessions, refreshWorkdirs]);
 ```
 
@@ -3647,20 +4429,22 @@ const handleLaunch = useCallback(async (p: LaunchProfile) => {
 ```
 
 
-- [ ] **步骤 6：构建与联调验证**
+- [x] **步骤 6：构建与联调验证**
 
-运行：`cd ui && npm run build` → `✓ built`。
-联调验证：
-1. 选中 `Cmd 手动`（或任一已装工具），工作目录点文件夹按钮 → 弹窗列出真实常用目录；选择后回填输入框。
-2. 下拉按钮 → 最近 5 条历史。
-3. 参数填 `/k`、运行方式=内嵌终端 → 点"启动工具" → 底部新标签出现 `cmd` 交互终端（`/k` 保持存活）。
-4. 运行方式=独立窗口 → 点启动 → 弹出独立 cmd 窗口，工作目录正确。
-5. Claude Code（若已装）显示"自动恢复会话"开关；保存后重启应用配置仍在。
+1. `cd ui && npm run build` → `✓ built`；`npm run lint` → 0 警告 0 错误（ConfigPanel 的草稿复位 effect 按计划依赖 `[profile.id]`，exhaustive-deps 警告以 eslint-disable 块注释豁免）。
+2. 沿用任务 12 的替代方案：headless Edge（Chromium 151）+ CDP 驱动 vite preview（MockBridge），19 项断言全过：
+   - 选中 Codex CLI → 配置面板渲染（logo `Co`/名称/`codex.exe` 文件名）；参数、workdir、env 文本域均可编辑（env 混入注释行与无 `=` 行验证解析）；
+   - workdir 下拉 → 最近目录菜单显示 mock 3 条，点选回填输入框、菜单关闭；文件夹按钮 → FolderPickerModal 打开，常用位置 = 历史 3 + commonDirs 4 去重合并 7 条（≤12），点选联动 path 输入与 active 高亮，确认后弹窗关闭且 workdir 输入框**立即回显**（App 层 profile → ConfigPanel workdir effect 生效）；
+   - 运行方式二选一切换（内嵌终端/独立窗口）正常；Claude Code（builtin）显示"启动时自动恢复上次会话"开关且可切换，Codex 不显示，手动添加的同名 "Claude Code"（非 builtin）也不显示——RESUMABLE 集合 + builtin 条件均验证；
+   - 保存 → panel-meta 短暂"已保存"（1.4s 后复位"未保存更改"）；启动（embedded）→ mock 下新终端标签出现并激活；
+   - **竞态防护对照实验**：先给 Claude/Codex 分别保存 args `AAA`/`BBB`，快速连点两者，4ms 间隔采样 200ms 窗口——带防护时全程 `BBB`（过期 `AAA` 从未出现）、标题跟随最后点击项；临时禁用防护重跑同一采样可捕获 `AAA`（t≈89–100ms 可见过期 profile），证明测试有判别力、防护实际生效；
+   - 布局探针对照设计稿第 62-63 行：config-top（logo+名称+文件名）、三段 config-section（启动参数/环境变量/运行方式）、workdir-control 三列 grid 实测 `527px 34px 34px`、choice-row 双等宽列、config-actions（primary 启动工具 + 保存配置）、switch 34×20，面板与页面均无横向溢出。
+3. 真实 WebView2 宿主联调（真实 cmd `/k` 存活、独立窗口弹出、重启后配置持久化）受任务 12 所述环境问题所限未执行，由后端 76 个单测覆盖桥接语义，待环境修复后补人工冒烟；未选工具 fallback 面板在 mock 下不可触发（启动即自动选中 preferred），仅经代码路径确认。
 
-- [ ] **步骤 7：Commit**
+- [x] **步骤 7：Commit**
 
 ```bash
-git add ui/src
+cd /c/workspace/ForgeDeck && git add ui/src docs/superpowers/plans/2026-08-14-forge-deck-mvp.md
 git commit -m "feat(ui): 启动配置面板——参数/工作目录控件/环境变量/运行方式/启动流程"
 ```
 
@@ -3672,7 +4456,13 @@ git commit -m "feat(ui): 启动配置面板——参数/工作目录控件/环�
 - 创建：`ui/src/ToolsView.tsx`、`ui/src/SessionsView.tsx`、`ui/src/SettingsView.tsx`
 - 修改：`ui/src/App.tsx`（替换三个占位视图）
 
-- [ ] **步骤 1：ToolsView**
+> **修正项（相对本计划初稿，实现时确认）：**
+> 1. SettingsView 的 `shell` 本地状态需显式 `useState<string>(...)`：初稿的 `useState(info.settings.defaultShell)` 会把状态收窄为 `'pwsh' | 'powershell' | 'cmd'` 联合类型，`setShell(e.target.value)`（string）过不了 tsc；到 `AppSettings['defaultShell']` 的收窄转换仍由 save 时的 `as` 承担。
+> 2. `handleSaveSettings` 按任务 13/14 惯例包 try/catch + console.error（失败兜底静默，Toast 任务 16 接入）；成功后 `setSettingsInfo` 回写，SettingsView 的 `[info]` effect 据此把表单回显为保存后的值。
+> 3. 设置仅影响新会话/新扫描（defaultShell 由后端在 `terminal.createShell` 读取、extraScanDirs 由扫描器读取），已开会话不受影响——无需前端额外代码，已确认。
+> 4. mock 桥 `terminal.close` 与真实后端 `Close` 一致为**移除会话**（`_sessions.Remove`），"已退出"态仅 `terminal.kill`/进程退出可达（running=false 保留在列表）；浏览器验证用临时桥补丁走 kill 路径核对"已退出 · exitCode"渲染，验证后已还原。
+
+- [x] **步骤 1：ToolsView**
 
 `ui/src/ToolsView.tsx`：
 
@@ -3714,7 +4504,7 @@ export function ToolsView({ tools, onRescan }: { tools: ToolListItem[]; onRescan
 }
 ```
 
-- [ ] **步骤 2：SessionsView**
+- [x] **步骤 2：SessionsView**
 
 `ui/src/SessionsView.tsx`：
 
@@ -3754,7 +4544,7 @@ export function SessionsView({ sessions, onNewShell }: {
 }
 ```
 
-- [ ] **步骤 3：SettingsView**
+- [x] **步骤 3：SettingsView**
 
 `ui/src/SettingsView.tsx`：
 
@@ -3766,7 +4556,7 @@ import type { AppSettings, SettingsInfo } from './types';
 export function SettingsView({ info, onSave }: { info: SettingsInfo; onSave: (s: AppSettings) => void }) {
   const [extraDirs, setExtraDirs] = useState(info.settings.extraScanDirs.join('\n'));
   const [autoScan, setAutoScan] = useState(info.settings.autoScanOnStartup);
-  const [shell, setShell] = useState(info.settings.defaultShell);
+  const [shell, setShell] = useState<string>(info.settings.defaultShell);
   const [skipExitConfirm, setSkipExitConfirm] = useState(info.settings.skipExitConfirm);
   const [preferEmbedded, setPreferEmbedded] = useState(info.settings.preferEmbedded);
 
@@ -3829,9 +4619,9 @@ export function SettingsView({ info, onSave }: { info: SettingsInfo; onSave: (s:
 
 （设计稿文案"关闭应用时保留会话"按规格修正为其实际语义"关闭应用时不弹会话确认"，其余文案与设计稿一致。）
 
-- [ ] **步骤 4：App 替换占位视图**
+- [x] **步骤 4：App 替换占位视图**
 
-`ui/src/App.tsx` 中三个占位 section 替换为：
+`ui/src/App.tsx` 中三个占位 section（现为简单 main-head）替换为：
 
 ```tsx
 <section className="view-panel" data-view-panel="tools" hidden={view !== 'tools'}>
@@ -3845,25 +4635,35 @@ export function SettingsView({ info, onSave }: { info: SettingsInfo; onSave: (s:
 </section>
 ```
 
-新增保存函数：
+新增保存函数（含修正项 2 的 try/catch）：
 
 ```tsx
 const handleSaveSettings = useCallback(async (settings: AppSettings) => {
-  setSettingsInfo(await bridge.request<SettingsInfo>('settings.save', { settings }));
+  try {
+    setSettingsInfo(await bridge.request<SettingsInfo>('settings.save', { settings }));
+  } catch (e) {
+    console.error('保存设置失败', e); // Toast 在任务 16 接入
+  }
 }, []);
 ```
 
 （补 import：`ToolsView`、`SessionsView`、`SettingsView`、类型 `AppSettings`。）
 
-- [ ] **步骤 5：构建与联调验证**
+- [x] **步骤 5：构建与联调验证**
 
-运行：`cd ui && npm run build` → `✓ built`。
-联调验证：工具库表格数据/来源标签正确；会话页卡片随内嵌启动实时出现"运行中"，kill 后变"已退出"；设置页改默认 Shell 为 `cmd` 保存 → 新建空白会话变 cmd；附加扫描目录填一个含 `claude.cmd` 的目录 → 重新扫描后出现该工具（来源=附加目录）；开关"关闭应用时不弹会话确认"后退出不再弹确认。
+1. `cd ui && npm run build` → `✓ built`；`npm run lint` → 0 警告 0 错误。
+2. 沿用任务 12/14 替代方案：headless Edge（Edg/151）+ CDP 驱动 vite preview（MockBridge，127.0.0.1），逐项验证全过：
+   - **工具库**：表头 5 列（工具/可执行文件/来源/默认方式/状态），mock 4 行渲染（Claude Code=内嵌终端、Cursor Agent=独立窗口、均"已安装"）；点"扫描本机工具"→ 视图切回 launcher 且扫描态触发（40ms 间隔采样：t=40–160ms "正在扫描…"、重新扫描按钮 disabled，t=200ms 起"自动扫描 · 已完成"）。
+   - **会话**：初始空态文案"暂无会话。启动工具或新建空白会话后在此查看。"；新建空白会话 → 卡片出现（标题 pwsh/workdir/运行中），终端面板同步出标签；点标签 × → mock close **移除**会话（与真实后端 Close 语义一致），卡片消失、空态恢复；"已退出"渲染经临时桥补丁走 `terminal.kill`（running=false + exitCode=1）核对 → 卡片保留且显示"已退出 · 1"，验证后补丁已还原（见修正项 4）。
+   - **设置**：两卡（工具发现/终端偏好）+ 附加扫描目录文本域 + 三开关（启动时自动扫描=on/关闭应用时不弹会话确认=off/优先使用内嵌终端=on）+ 默认 Shell 输入渲染；改 defaultShell 为 `cmd`、填两行附加目录、关自动扫描 → 保存 → `settings.get` 回读 `defaultShell=cmd`、`autoScanOnStartup=false`、`extraScanDirs` 两行按 trim/去空行解析，且输入框/开关立即回显新值（SettingsView `[info]` effect 生效；**任务 16 补注（误归因修正）**：mock 的 `settings.save` 返回的是同一 `this.settings` 对象引用，React 同引用 bailout 下 `setSettingsInfo` 不触发重渲染、`[info]` effect 实际不会重跑——当时的"立即回显"来自表单本地草稿本身。该 effect 路径仅在真实桥下成立（每次响应均为新反序列化对象）），未提交字段（maxWorkdirHistory 等）经 `...info.settings` 展开保留。
+   - **term-hidden 回归**：工具库与设置视图根节点均为 `app term-hidden`，会话视图为 `app`（按设计保留终端面板）。
+   - **视觉对照**（设计稿 66-83 行）：三视图截图经视觉模型核对——eyebrow/title/sub/按钮文案、表格结构与 4 行数据、会话卡（标题+mono 路径+状态）、设置卡（文本域/输入框/三开关/右下 primary 保存按钮）均与设计稿一致；布局探针：三视图均无横向溢出，session-grid/settings-grid 实测两等宽列（478px×2），data-table 968px 贴合 970px 面板。
+3. mock 限制（注明）：`settings.save` 仅持久于内存，页面刷新即重置（刷新后实测 autoScan 回 true、defaultShell 回 pwsh），"关闭自动扫描 → 刷新后启动走 tools.list"与"附加扫描目录 → 重扫出现新工具（来源=附加目录）"两条依赖持久化/真实扫描器的链路无法在 mock 下验证，由后端单测（ConfigStore 持久化、扫描器 extraScanDirs 合并）覆盖，任务 16 真机验收时复核；mock 的 `terminal.createShell` 标题硬编码 pwsh，"改 cmd → 新会话标题变 cmd"同属真机项（真实桥读 `Settings.DefaultShell`）。
 
-- [ ] **步骤 6：Commit**
+- [x] **步骤 6：Commit**
 
 ```bash
-git add ui/src
+cd /c/workspace/ForgeDeck && git add ui/src docs/superpowers/plans/2026-08-14-forge-deck-mvp.md
 git commit -m "feat(ui): 工具库/终端会话/设置视图接入真实数据"
 ```
 
@@ -3873,9 +4673,9 @@ git commit -m "feat(ui): 工具库/终端会话/设置视图接入真实数据"
 
 **文件：**
 - 创建：`ui/src/Toast.tsx`
-- 修改：`ui/src/App.tsx`（toast 接线：启动失败、添加成功等）、`README.md`
+- 修改：`ui/src/App.tsx`（toast 接线）、`ui/src/TerminalPanel.tsx`（session-gone 静默判定）、`ui/src/app.css`、`ui/src/TopBar.tsx`、`ui/src/ConfigPanel.tsx`、`ui/src/AddToolModal.tsx`、`ui/src/lib/env.ts`、`ui/src/WorkdirControl.tsx`、`ui/src/SettingsView.tsx`、`src/ForgeDeck.Core/Scanning/StartMenuScanSource.cs`、`README.md`
 
-- [ ] **步骤 1：Toast 组件**
+- [x] **步骤 1：Toast 组件**（按计划实现，无偏差）
 
 `ui/src/Toast.tsx`：
 
@@ -3894,7 +4694,7 @@ export function Toast({ items }: { items: ToastItem[] }) {
 }
 ```
 
-- [ ] **步骤 2：App 接线**
+- [x] **步骤 2：App 接线**（按计划；偏差与补充：catch 分支保留 console.error 同时加 toast；`handleAddTool` 失败 toast 后 rethrow 由弹窗就地展示同一错误并复位提交态；启动 effect/useCallback 依赖数组补 `toast`）
 
 `ui/src/App.tsx`：
 
@@ -3907,35 +4707,53 @@ const toast = useCallback((text: string, kind: ToastItem['kind'] = 'info') => {
 }, []);
 ```
 
-把任务 13/14 中 `console.error` 的失败分支替换为 `toast(e.message, 'error')`（`handleLaunch`、`handleNewShell`、启动加载 catch、`handleAddTool` 在 AddToolModal 内已就地展示错误，无需 toast）；`handleSaveProfile`/`handleSaveSettings` 成功后 `toast('已保存')`；`handleAddTool` 成功后 `toast('已添加到工具库')`；独立窗口启动成功 `toast(\`已在独立窗口打开 ${tool.tool.name}\`)`。渲染 `<Toast items={toasts} />` 于根 div 末尾。
+错误路径：启动加载 catch、`handleRescan`/`handleNewShell`/`handleSaveSettings`/`handleLaunch`/`handleSaveProfile` 的 catch → `toast(e.message, 'error')`；`handleAddTool` 失败 → toast + rethrow（弹窗内就地展示）。成功 toast：`handleSaveProfile` → `'已保存'`、`handleSaveSettings` → `'设置已保存'`、`handleAddTool` → `'已添加到工具库'`、独立窗口启动 → `` `已在独立窗口打开 ${tool.tool.name}` ``。渲染 `<Toast items={toasts} />` 于根 div 末尾。
 
-- [ ] **步骤 3：验收清单（对照规格与设计稿逐项跑）**
+TerminalPanel 补充：write/resize 的 catch 收敛为 `ignoreSessionGone`——`session-gone` 前缀（关标签瞬间在途请求的良性竞态）静默，其余打 console.error（handleLaunch 的 embedded 分支无需特判，create 不会返回该码）。
 
-运行全量测试：`dotnet test` → 预期全部 Passed。
-构建发布产物：`cd ui && npm run build`，然后仓库根 `dotnet build`。
-以**非 dev 模式**启动 `dotnet run --project src/ForgeDeck.App` 逐项验证：
+- [x] **步骤 3：验收**
 
-1. 快速启动：自动扫描、三指标、工具列表与配置面板联动、手动添加（成功/失败路径）。
-2. 工作目录：历史下拉（最近 5）、文件夹选择弹窗（常用位置=真实目录+历史）、手输路径。
-3. 内嵌终端：启动工具进新标签、输入输出、resize、关标签、新建空白会话（默认 Shell 遵循设置）。
-4. 独立窗口：参数/环境变量/工作目录生效（用 `cmd /k set FOO=bar` 类命令验证 env）。
-5. 环境变量：`KEY=VALUE` 多行保存，启动的进程内 `set KEY` 可见。
-6. 自动恢复开关：Claude Code 开启后启动命令追加 `--continue`（终端回显可见）。
-7. 工具库/会话/设置三视图数据与行为。
-8. 退出确认：有运行会话时弹确认；设置开关后不弹。
-9. 视觉对照：并排打开 `docs/design/Web-Prototype/ai-tool-launcher.html` 与应用（1280×800），逐视图核对布局/配色/间距/交互动效（视图切换动画、弹窗进出场、focus-visible、开关动效）。
-10. 响应式：窗口缩到 920px 以下侧栏收窄为图标；560px 以下指标单列（WebView2 拖拽窗口宽度验证）。
+本机 WebView2 已知异常，WPF 宿主真机清单跳过，以「全量测试 + 构建产物 + 浏览器断言」替代执行：
 
-发现问题回改对应任务组件，全部通过后进入下一步。
+1. `dotnet test` → 76/76 Passed；`dotnet build --no-incremental` → 0 警告 0 错误；`cd ui && npm run build` → ✓ built；`npm run lint` → 0 warnings 0 errors。
+2. 构建产物：`ui/dist`（index.html + assets/index-*.js|css）完整复制入 ForgeDeck.App 输出 wwwroot。
+3. 浏览器验收（headless Edge + CDP + 伪 WebView2 桥注入：比 MockBridge 更强，可检查全部请求载荷并按方法注入错误响应），26 项断言 + 1 项专项全过：
+   - 启动成功/rescan 成功/内嵌启动成功 均无 toast（设计如此，成功 toast 仅四处：保存配置/保存设置/添加工具/独立窗口）。
+   - AddToolModal：无效提交就地展示（弹窗内、无桥请求、无 toast）；桥失败（注入）→ 一条错误 toast + 弹窗就地展示同一错误 + 提交态复位；添加成功 → toast 一次 + 载荷正确 + 列表 5 行。
+   - env 值 trim：`KEY = value` 载荷 `{KEY:'value'}`。
+   - 连续两次保存 flash 令牌化：第二次 flash 存活 >1.15s、~1.4s 熄灭（无令牌时会在 ~1.1s 被第一次的定时器误关）。
+   - 非法 shell（bash）→ 载荷 pwsh、输入框保留原文；` cmd ` → 载荷 cmd。
+   - term-hidden 视图 toast-wrap bottom=18px，常规视图 280px。
+   - 错误 toast（rescan/settings.save/app.info 断桥注入）：文案 `code: message`、红边 rgb(229,72,77)（--danger）、3.2s 自动消失（实测 3211ms）、console.error 保留。
+   - session-gone 在途写入静默（0 console.error），非 session-gone 写失败打 console.error。
+   - 通知装饰按钮 tabIndex=-1；workdir aria-controls 收起时不挂载、展开指向 workdirMenu。
+4. 真机保留项（WebView2 环境恢复后复核）：真实扫描/ConPTY 输入输出/独立窗口 env 生效（`cmd /k set FOO=bar`）/自动恢复 `--continue` 回显/退出确认/响应式拖拽。
 
-- [ ] **步骤 4：更新 README 并 Commit**
+- [x] **步骤 3.5：审查遗留清理**（任务 16 扩展，一次小提交）
 
-`README.md` 增加一节「功能现状」简述 MVP 已支持能力（扫描/配置/两种启动/工作目录历史/设置），保持简洁。
+1. `app.css` 末尾追加 `.app.term-hidden .toast-wrap{bottom:18px}`；`:root` 增 `--danger:#e5484d`，`.toast.error` 边色与 AddToolModal 内联错误色改引用令牌。
+2. `TopBar.tsx` 通知装饰按钮 `tabIndex={-1}`。
+3. `ConfigPanel.tsx` save 改 async：`await onSave(current())` 后走 flash（失败不闪，错误 toast 由 App 层弹）；flash 用 `flashSeq` ref 序号令牌，定时器回调校验令牌才熄灭。`onSave` prop 类型放宽为 `void | Promise<void>`。
+4. `lib/env.ts` parseEnvText 值侧 trim（key 侧不变）。
+5. `WorkdirControl.tsx` `aria-controls` 仅 menuOpen 时挂载。
+6. `SettingsView.tsx` shell 载荷校验：`['pwsh','powershell','cmd'].includes(shell.trim())` 否则回退 pwsh，输入框保留原文。
+7. `StartMenuScanSource.cs` Scan 方法 40-52 行区域缩进对齐修复（纯格式）。
+8. 任务 15 步骤 5 设置段补注 mock 同引用 bailout 误归因说明。
+9. `README.md` 增「功能现状」一节。
+
+- [x] **步骤 4：更新 README 并 Commit**（分两次提交）
 
 ```bash
-git add ui/src README.md
-git commit -m "feat(ui): 错误 Toast 与验收收尾"
+git add ui/src/Toast.tsx ui/src/App.tsx ui/src/TerminalPanel.tsx
+git commit -m "feat(ui): 错误 Toast 与成功反馈接线"
+git add ui/src/app.css ui/src/TopBar.tsx ui/src/ConfigPanel.tsx ui/src/AddToolModal.tsx \
+        ui/src/lib/env.ts ui/src/WorkdirControl.tsx ui/src/SettingsView.tsx \
+        src/ForgeDeck.Core/Scanning/StartMenuScanSource.cs README.md \
+        docs/superpowers/plans/2026-08-14-forge-deck-mvp.md
+git commit -m "chore: 审查遗留清理——toast 定位/令牌化/可访问性/格式与文档"
 ```
+
+（实际提交：第一笔 `3476062` feat(ui): 错误 Toast 与成功反馈接线；第二笔 chore: 审查遗留清理——toast 定位/令牌化/可访问性/格式与文档，即本计划文档所在的收尾提交，hash 见 git log。）
 
 ---
 
@@ -3944,3 +4762,17 @@ git commit -m "feat(ui): 错误 Toast 与验收收尾"
 - **规格覆盖度**：§2 目标 1→任务 6/7（扫描）+13（手动添加）；目标 2→任务 14（配置面板）；目标 3→任务 9/12（内嵌终端）；目标 4→任务 8/14（独立窗口）；目标 5→任务 5/14（工作目录历史）；目标 6→任务 15（设置页）。§3 桥接方法→任务 10 全量注册（`dialog.selectDirectory` 已按规格更新移除，改应用内选择器）。§4.1 数据源→任务 6/7；§4.2 配置→任务 4/5；§4.3 启动包装→任务 8；§4.4 终端→任务 9；§4.5 桥→任务 10/11。§5 前端四视图+弹窗+Mock→任务 1/2/3/12/13/14/15。§6 流程→任务 13/14 启动主线；§7 错误→任务 10（错误封包）/11（退出确认）/16（Toast）+任务 4（损坏恢复）；§8 测试→各任务 TDD 步骤。无遗漏。
 - **占位符扫描**：无"待定/TODO"；任务 13 的 configPanel 占位是任务内的显式中间态，任务 14 替换为真实现，链路闭合。
 - **类型一致性**：`LaunchProfile.autoRestore`（任务 4 定义，8/10/14 使用）；`ScanHit(ExePath, Known, SourceLabel)`（任务 6 定义，7 使用）；`TerminalSessionInfo(SessionId, Title, Workdir, Running, ExitCode)`（任务 9 定义，10/12/15 使用）；前端 `ToolListItem{tool,exists,defaultMode}`（任务 2 定义，与任务 10 C# `ToolListItem(Tool, Exists, DefaultMode)` 序列化一致）；桥方法名前后端一致（`tools.*`/`profiles.*`/`settings.*`/`workdirs.*`/`sessions.list`/`terminal.*`/`app.info`/`launch.external`）。
+
+## 合并后跟进项（最终整体审查 2026-08-15）
+
+已随合并处理：规格 §4.5 原生对话框描述回写为应用内弹窗（M3）；csproj 显式 Version 0.1.0（M6）。
+
+遗留跟进（均有 toast/等价兜底，非功能缺失）：
+- I1：终端 spawn 失败按规格应为"标签内错误+重试按钮"，当前实现为错误 toast + 手动重点启动（App.tsx handleLaunch/handleNewShell catch）。
+- I2：启动校验错误（exe/workdir 不存在）无结构化字段定位与配置项跳转，当前 toast 文本已指明缺什么；LaunchService.Validate 抛 InvalidOperationException 归 internal 码，可改 BridgeException("validation")。
+- M1：terminal.exit 事件后端发射、前端零消费者（sessions.changed 等价覆盖）。
+- M2：配置损坏恢复为静默重建，规格要求 UI 提示。
+- M4：§4.1 的 iconSource/注册表"未识别"工具收录未实现（实现取 §4.2 单 source 字段 + 前端名字 logo）。
+- M5：ui/public/icons.svg 死资产可删。
+- M7：桥层薄封装方法（createShell/kill/close、tools.list、profiles.delete、workdirs.remove）无 BridgeTests 直接分发测试（Core 层有测）。
+- 真机保留项：本机 WebView2 运行时异常，WPF 宿主内真实 ConPTY 冒烟待环境修复后补做（窗口可开、桥有 76 单测覆盖）。
