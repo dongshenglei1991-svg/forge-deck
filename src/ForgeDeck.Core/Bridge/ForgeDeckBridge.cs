@@ -11,9 +11,16 @@ public sealed record CommonDir(string Name, string Path);
 public sealed record AppInfo(string Version, string UserName, DateTime? LastScanAt, LastUsedInfo? LastUsed);
 public sealed record SettingsInfo(AppSettings Settings, IReadOnlyList<CommonDir> CommonDirs, string UserName);
 
+/// <summary>业务方法接线。线程模型：handler 由宿主在 UI 线程串行调用，ConfigStore 变更无需加锁；
+/// 唯一例外 tools.rescan——扫描与合并已 Task.Run 化，且只读脱离 store 的快照、不触碰 ConfigStore，
+/// 合并结果回 UI 线程写回。终端 Output/Exited/Changed 事件来自后台线程，经 Dispatcher.Emit 透传
+/// （Emit 仅做序列化，不写共享状态）。</summary>
 public sealed class ForgeDeckBridge
 {
     public const string Version = "0.1.0";
+
+    // 反序列化复用同一 options 实例，保留 STJ 元数据缓存（WriteIndented 对反序列化无影响，可复用 Opts 风格）
+    private static readonly JsonSerializerOptions PayloadOpts = JsonOptions.Create(o => o.WriteIndented = false);
 
     private readonly ConfigStore _store;
     private readonly ToolScanner _scanner;
@@ -43,14 +50,18 @@ public sealed class ForgeDeckBridge
 
         Dispatcher.Register("tools.list", _ => Task.FromResult<object?>(ToolsList()));
 
-        Dispatcher.Register("tools.rescan", _ =>
+        Dispatcher.Register("tools.rescan", async _ =>
         {
-            var found = _scanner.Scan(new ScanContext(_store.Config.Settings.ExtraScanDirs));
-            var manual = _store.Config.Tools.Where(t => t.Manual).ToList();
-            _store.Config.Tools = manual.Concat(found).ToList();
+            // 快照脱离 store（后台不得触碰 ConfigStore）；扫描与合并在线程池执行——
+            // UI 线程同步扫描会冻结窗口并反压终端输出泵；合并结果在 UI 线程写回
+            var snapshot = _store.Config.Tools.Select(CloneTool).ToList();
+            var extraDirs = _store.Config.Settings.ExtraScanDirs.ToList();
+            var merged = await Task.Run(() =>
+                MergeScanResults(snapshot, _scanner.Scan(new ScanContext(extraDirs))));
+            _store.Config.Tools = merged;
             _store.Config.LastScanAt = DateTime.UtcNow;
             _store.Save();
-            return Task.FromResult<object?>(ToolsList());
+            return ToolsList();
         });
 
         Dispatcher.Register("tools.addManual", p =>
@@ -80,7 +91,7 @@ public sealed class ForgeDeckBridge
 
         Dispatcher.Register("profiles.save", p =>
         {
-            var profile = p?.GetProperty("profile").Deserialize<LaunchProfile>(JsonOptions.Create(o => o.WriteIndented = false))
+            var profile = p?.GetProperty("profile").Deserialize<LaunchProfile>(PayloadOpts)
                 ?? throw new BridgeException("validation", "无效的配置");
             _store.Config.Profiles.RemoveAll(x => x.Id == profile.Id || x.ToolId == profile.ToolId);
             _store.Config.Profiles.Add(profile);
@@ -101,7 +112,7 @@ public sealed class ForgeDeckBridge
 
         Dispatcher.Register("settings.save", p =>
         {
-            var settings = p?.GetProperty("settings").Deserialize<AppSettings>(JsonOptions.Create(o => o.WriteIndented = false))
+            var settings = p?.GetProperty("settings").Deserialize<AppSettings>(PayloadOpts)
                 ?? throw new BridgeException("validation", "无效的设置");
             _store.Config.Settings = settings;
             _store.Save();
@@ -158,9 +169,12 @@ public sealed class ForgeDeckBridge
 
         Dispatcher.Register("terminal.write", p =>
         {
+            // 参数提取在 try 外：畸形请求（缺属性）应报 internal，不得误标 session-gone
+            var sessionId = p?.GetProperty("sessionId").GetString() ?? "";
+            var data = p?.GetProperty("data").GetString() ?? "";
             try
             {
-                _terminal.Write(p?.GetProperty("sessionId").GetString() ?? "", p?.GetProperty("data").GetString() ?? "");
+                _terminal.Write(sessionId, data);
             }
             catch (KeyNotFoundException)
             {
@@ -172,10 +186,11 @@ public sealed class ForgeDeckBridge
 
         Dispatcher.Register("terminal.resize", p =>
         {
+            var sessionId = p?.GetProperty("sessionId").GetString() ?? "";
+            var (cols, rows) = Size(p);
             try
             {
-                _terminal.Resize(p?.GetProperty("sessionId").GetString() ?? "",
-                    p?.GetProperty("cols").GetInt32() ?? 80, p?.GetProperty("rows").GetInt32() ?? 24);
+                _terminal.Resize(sessionId, cols, rows);
             }
             catch (KeyNotFoundException)
             {
@@ -215,6 +230,47 @@ public sealed class ForgeDeckBridge
             _store.Config.Profiles.FirstOrDefault(p => p.ToolId == t.Id)?.OpenMode
                 ?? (_store.Config.Settings.PreferEmbedded ? OpenMode.Embedded : OpenMode.External)))
         .ToList();
+
+    /// <summary>重扫合并：按 ExePath（OrdinalIgnoreCase）复用旧条目，保留 Id 与 Manual 标记——
+    /// 否则每次重扫重铸 Id，profile/lastUsed 会静默失联（autoScanOnStartup=true 时每次启动都被重置）。
+    /// 复用条目刷新展示字段（Name/Type/Source/Builtin），新路径才铸造新条目；
+    /// 非手动且未被扫到的旧条目随重扫淘汰（扫描是来源的事实来源）。仅触碰快照，不改 ConfigStore。</summary>
+    private static List<ToolInfo> MergeScanResults(List<ToolInfo> oldTools, List<ToolInfo> found)
+    {
+        var oldByPath = new Dictionary<string, ToolInfo>(StringComparer.OrdinalIgnoreCase);
+        foreach (var old in oldTools)
+            oldByPath[Path.GetFullPath(old.ExePath)] = old;
+
+        var result = oldTools.Where(t => t.Manual).ToList();
+        foreach (var fresh in found)
+        {
+            var path = Path.GetFullPath(fresh.ExePath);
+            if (oldByPath.TryGetValue(path, out var existing))
+            {
+                existing.Name = fresh.Name;
+                existing.Type = fresh.Type;
+                existing.Source = fresh.Source;
+                existing.Builtin = fresh.Builtin;
+                if (!existing.Manual) result.Add(existing);
+            }
+            else
+            {
+                result.Add(fresh);
+            }
+        }
+        return result;
+    }
+
+    private static ToolInfo CloneTool(ToolInfo t) => new()
+    {
+        Id = t.Id,
+        Name = t.Name,
+        Type = t.Type,
+        ExePath = t.ExePath,
+        Source = t.Source,
+        Builtin = t.Builtin,
+        Manual = t.Manual,
+    };
 
     private LaunchProfile ResolveProfile(string toolId, JsonElement? p)
     {

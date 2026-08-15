@@ -2615,6 +2615,8 @@ public class BridgeTests : IDisposable
     private readonly ConfigStore _store = null!;
     // TerminalCreate_WithCmdTool 会 spawn 真实进程：终端必须存字段并在 Dispose 释放
     private readonly TerminalSessionManager _terminal = new();
+    // 可注入命中：rescan 复用测试需要扫描器返回既有工具同路径的命中
+    private readonly List<ScanHit> _scanHits = new();
     private readonly ForgeDeckBridge _bridge = null!;
 
     public BridgeTests()
@@ -2624,7 +2626,7 @@ public class BridgeTests : IDisposable
         _store.Load();
         _bridge = new ForgeDeckBridge(
             _store,
-            new ToolScanner(new IScanSource[] { new EmptySource() }),
+            new ToolScanner(new IScanSource[] { new FixedSource(_scanHits) }),
             _terminal);
     }
 
@@ -2634,9 +2636,9 @@ public class BridgeTests : IDisposable
         try { Directory.Delete(_dir, true); } catch { }
     }
 
-    private sealed class EmptySource : IScanSource
+    private sealed class FixedSource(List<ScanHit> hits) : IScanSource
     {
-        public IEnumerable<ScanHit> Scan(ScanContext context) { yield break; }
+        public IEnumerable<ScanHit> Scan(ScanContext context) => hits;
     }
 
     private static JsonElement ResultOf(string response)
@@ -2668,6 +2670,19 @@ public class BridgeTests : IDisposable
         Assert.NotNull(resp);
         var (code, _) = ErrorOf(resp!)!.Value;
         Assert.Equal("-32601", code);
+    }
+
+    [Fact]
+    public async Task HandleAsync_NullBodyOrNonStringMethod_ReturnsErrorNotThrow()
+    {
+        // 宿主 TryGetWebMessageAsString 可能返回 null；method 为数字时 GetString 会抛——都不得让异常逃逸
+        var nullResp = await _bridge.Dispatcher.HandleAsync(null!);
+        Assert.NotNull(nullResp);
+        Assert.Equal("-32700", ErrorOf(nullResp!)!.Value.Code);
+
+        var numMethodResp = await _bridge.Dispatcher.HandleAsync("""{"id":40,"method":123}""");
+        Assert.NotNull(numMethodResp);
+        Assert.Equal("-32602", ErrorOf(numMethodResp!)!.Value.Code);
     }
 
     [Fact]
@@ -2734,16 +2749,83 @@ public class BridgeTests : IDisposable
         var cmdScript = Path.Combine(_dir, "claude.cmd");
         File.WriteAllText(cmdScript, "@echo off\r\necho forge-bridge-e2e\r\n");
         _store.Config.Tools.Add(new ToolInfo { Id = "tc1", Name = "Fake Claude", ExePath = cmdScript, Source = "测试" });
-        var resp = await _bridge.Dispatcher.HandleAsync(
-            """{"id":8,"method":"terminal.create","params":{"toolId":"tc1","cols":80,"rows":24}}""");
-        var sessionId = ResultOf(resp!).GetProperty("sessionId").GetString();
-        Assert.NotNull(sessionId);
 
-        var listResp = await _bridge.Dispatcher.HandleAsync("""{"id":9,"method":"sessions.list"}""");
-        Assert.Equal(1, ResultOf(listResp!).GetArrayLength());
-        // lastUsed 与工作目录历史联动
+        // 事件转发：Output → terminal.data 事件封包（订阅须先于创建，首块输出可能立即可达）
+        var outgoing = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var acc = "";
+        void OnOutgoing(string message)
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(message);
+                if (doc.RootElement.TryGetProperty("event", out var ev) && ev.GetString() == "terminal.data")
+                {
+                    acc += doc.RootElement.GetProperty("data").GetProperty("chunk").GetString() ?? "";
+                    if (acc.Contains("forge-bridge-e2e")) outgoing.TrySetResult(message);
+                }
+            }
+            catch (JsonException) { }
+        }
+        _bridge.Dispatcher.Outgoing += OnOutgoing;
+        try
+        {
+            var resp = await _bridge.Dispatcher.HandleAsync(
+                """{"id":8,"method":"terminal.create","params":{"toolId":"tc1","cols":80,"rows":24}}""");
+            var sessionId = ResultOf(resp!).GetProperty("sessionId").GetString();
+            Assert.NotNull(sessionId);
+
+            var done = await Task.WhenAny(outgoing.Task, Task.Delay(TimeSpan.FromSeconds(2)));
+            Assert.True(done == outgoing.Task, $"超时未收到 terminal.data 事件，累计输出：{acc}");
+            using var payload = JsonDocument.Parse(outgoing.Task.Result);
+            Assert.Equal("terminal.data", payload.RootElement.GetProperty("event").GetString());
+            Assert.Equal(sessionId, payload.RootElement.GetProperty("data").GetProperty("sessionId").GetString());
+
+            var listResp = await _bridge.Dispatcher.HandleAsync("""{"id":9,"method":"sessions.list"}""");
+            Assert.Equal(1, ResultOf(listResp!).GetArrayLength());
+            // lastUsed 与工作目录历史联动
+            Assert.NotNull(_store.Config.LastUsed);
+            Assert.Equal("tc1", _store.Config.LastUsed!.ToolId);
+        }
+        finally { _bridge.Dispatcher.Outgoing -= OnOutgoing; }
+    }
+
+    [Fact]
+    public async Task Rescan_ReusesToolByPath_PreservesIdProfileAndLastUsed()
+    {
+        var cmdScript = Path.Combine(_dir, "claude.cmd");
+        File.WriteAllText(cmdScript, "@echo off\r\n");
+        _store.Config.Tools.Add(new ToolInfo { Id = "keep1", Name = "Fake Claude", ExePath = cmdScript, Source = "测试" });
+        await _bridge.Dispatcher.HandleAsync(
+            """{"id":20,"method":"profiles.save","params":{"profile":{"id":"p20","toolId":"keep1","name":"默认","args":"","env":{},"workdir":"","openMode":"external","autoRestore":false}}}""");
+        _store.Config.LastUsed = new LastUsedInfo { ToolId = "keep1", Workdir = _dir };
+
+        // 同路径重扫：复用旧条目（Id 不变、展示字段刷新），profile/lastUsed 不失联
+        _scanHits.Add(new ScanHit(cmdScript, null, "新扫描源"));
+        var resp = await _bridge.Dispatcher.HandleAsync("""{"id":21,"method":"tools.rescan"}""");
+        var list = ResultOf(resp!);
+        Assert.Equal(1, list.GetArrayLength());
+        Assert.Equal("keep1", list[0].GetProperty("tool").GetProperty("id").GetString());
+        Assert.Equal("新扫描源", list[0].GetProperty("tool").GetProperty("source").GetString());
+
+        var profileResp = await _bridge.Dispatcher.HandleAsync(
+            """{"id":22,"method":"profiles.get","params":{"toolId":"keep1"}}""");
+        Assert.Equal("p20", ResultOf(profileResp!).GetProperty("id").GetString());
+
+        Assert.Contains(_store.Config.Tools, t => t.Id == _store.Config.LastUsed!.ToolId);
+    }
+
+    [Fact]
+    public async Task LaunchExternal_CmdExitZero_ReturnsPidAndRecordsUsage()
+    {
+        var cmdExe = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe");
+        _store.Config.Tools.Add(new ToolInfo { Id = "le1", Name = "cmd", ExePath = cmdExe, Source = "测试" });
+        await _bridge.Dispatcher.HandleAsync(
+            """{"id":31,"method":"profiles.save","params":{"profile":{"id":"p31","toolId":"le1","name":"默认","args":"/c exit 0","env":{},"workdir":"","openMode":"external","autoRestore":false}}}""");
+        var resp = await _bridge.Dispatcher.HandleAsync(
+            """{"id":32,"method":"launch.external","params":{"toolId":"le1"}}""");
+        Assert.True(ResultOf(resp!).GetProperty("pid").GetInt32() > 0);
         Assert.NotNull(_store.Config.LastUsed);
-        Assert.Equal("tc1", _store.Config.LastUsed!.ToolId);
+        Assert.Equal("le1", _store.Config.LastUsed!.ToolId);
     }
 
     [Fact]
@@ -2823,8 +2905,12 @@ public sealed class BridgeDispatcher
     public void Emit(string eventName, object data) =>
         Outgoing?.Invoke(JsonSerializer.Serialize(new { @event = eventName, data }, Opts));
 
+    /// <remarks>宿主侧调用链在 async void 消息事件里（UI 消息循环），任何异常逃逸都会崩进程：
+    /// 入口空串兜底、method 类型校验、handler 异常封包、响应封包 try/catch，全程不抛。</remarks>
     public async Task<string?> HandleAsync(string json)
     {
+        // 宿主 TryGetWebMessageAsString 可能返回 null/空白：统一按解析失败封包
+        if (string.IsNullOrWhiteSpace(json)) return Error(null, "-32700", "请求不是合法 JSON");
         JsonElement? id = null;
         string? method = null;
         JsonElement? parameters = null;
@@ -2834,7 +2920,9 @@ public sealed class BridgeDispatcher
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object) return Error(null, "-32600", "请求必须是 JSON 对象");
             if (root.TryGetProperty("id", out var idEl)) id = idEl.Clone();
-            if (root.TryGetProperty("method", out var mEl)) method = mEl.GetString();
+            // method 非字符串（如数字）时 GetString 会抛 InvalidOperationException：按缺失处理
+            if (root.TryGetProperty("method", out var mEl))
+                method = mEl.ValueKind == JsonValueKind.String ? mEl.GetString() : null;
             if (root.TryGetProperty("params", out var pEl) && pEl.ValueKind != JsonValueKind.Null)
                 parameters = pEl.Clone();
         }
@@ -2850,21 +2938,34 @@ public sealed class BridgeDispatcher
         object? result;
         try { result = await handler(parameters); }
         catch (BridgeException ex) { return Error(id, ex.Code, ex.Message); }
-        catch (Exception ex) { return Error(id, "internal", ex.Message); }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[ForgeDeck] 桥方法 {method} 失败：{ex.Message}");
+            return Error(id, "internal", ex.Message);
+        }
         if (id == null) return null;
 
-        // 响应封包必须用 Utf8JsonWriter 回写原始 id：匿名对象序列化时 default 的 JsonElement 会抛
-        using var ms = new MemoryStream();
-        using (var writer = new Utf8JsonWriter(ms))
+        // 响应封包必须用 Utf8JsonWriter 回写原始 id：匿名对象序列化时 default 的 JsonElement 会抛；
+        // 封包/序列化同样兜底为 internal
+        try
         {
-            writer.WriteStartObject();
-            writer.WritePropertyName("id");
-            id.Value.WriteTo(writer);
-            writer.WritePropertyName("result");
-            JsonSerializer.Serialize(writer, result, Opts);
-            writer.WriteEndObject();
+            using var ms = new MemoryStream();
+            using (var writer = new Utf8JsonWriter(ms))
+            {
+                writer.WriteStartObject();
+                writer.WritePropertyName("id");
+                id.Value.WriteTo(writer);
+                writer.WritePropertyName("result");
+                JsonSerializer.Serialize(writer, result, Opts);
+                writer.WriteEndObject();
+            }
+            return Encoding.UTF8.GetString(ms.ToArray());
         }
-        return Encoding.UTF8.GetString(ms.ToArray());
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[ForgeDeck] 桥响应封包失败（{method}）：{ex.Message}");
+            return Error(id, "internal", ex.Message);
+        }
     }
 
     private static string Error(JsonElement? id, string code, string message)
@@ -2906,9 +3007,16 @@ public sealed record CommonDir(string Name, string Path);
 public sealed record AppInfo(string Version, string UserName, DateTime? LastScanAt, LastUsedInfo? LastUsed);
 public sealed record SettingsInfo(AppSettings Settings, IReadOnlyList<CommonDir> CommonDirs, string UserName);
 
+/// <summary>业务方法接线。线程模型：handler 由宿主在 UI 线程串行调用，ConfigStore 变更无需加锁；
+/// 唯一例外 tools.rescan——扫描与合并已 Task.Run 化，且只读脱离 store 的快照、不触碰 ConfigStore，
+/// 合并结果回 UI 线程写回。终端 Output/Exited/Changed 事件来自后台线程，经 Dispatcher.Emit 透传
+/// （Emit 仅做序列化，不写共享状态）。</summary>
 public sealed class ForgeDeckBridge
 {
     public const string Version = "0.1.0";
+
+    // 反序列化复用同一 options 实例，保留 STJ 元数据缓存（WriteIndented 对反序列化无影响，可复用 Opts 风格）
+    private static readonly JsonSerializerOptions PayloadOpts = JsonOptions.Create(o => o.WriteIndented = false);
 
     private readonly ConfigStore _store;
     private readonly ToolScanner _scanner;
@@ -2938,14 +3046,18 @@ public sealed class ForgeDeckBridge
 
         Dispatcher.Register("tools.list", _ => Task.FromResult<object?>(ToolsList()));
 
-        Dispatcher.Register("tools.rescan", _ =>
+        Dispatcher.Register("tools.rescan", async _ =>
         {
-            var found = _scanner.Scan(new ScanContext(_store.Config.Settings.ExtraScanDirs));
-            var manual = _store.Config.Tools.Where(t => t.Manual).ToList();
-            _store.Config.Tools = manual.Concat(found).ToList();
+            // 快照脱离 store（后台不得触碰 ConfigStore）；扫描与合并在线程池执行——
+            // UI 线程同步扫描会冻结窗口并反压终端输出泵；合并结果在 UI 线程写回
+            var snapshot = _store.Config.Tools.Select(CloneTool).ToList();
+            var extraDirs = _store.Config.Settings.ExtraScanDirs.ToList();
+            var merged = await Task.Run(() =>
+                MergeScanResults(snapshot, _scanner.Scan(new ScanContext(extraDirs))));
+            _store.Config.Tools = merged;
             _store.Config.LastScanAt = DateTime.UtcNow;
             _store.Save();
-            return Task.FromResult<object?>(ToolsList());
+            return ToolsList();
         });
 
         Dispatcher.Register("tools.addManual", p =>
@@ -2975,7 +3087,7 @@ public sealed class ForgeDeckBridge
 
         Dispatcher.Register("profiles.save", p =>
         {
-            var profile = p?.GetProperty("profile").Deserialize<LaunchProfile>(JsonOptions.Create(o => o.WriteIndented = false))
+            var profile = p?.GetProperty("profile").Deserialize<LaunchProfile>(PayloadOpts)
                 ?? throw new BridgeException("validation", "无效的配置");
             _store.Config.Profiles.RemoveAll(x => x.Id == profile.Id || x.ToolId == profile.ToolId);
             _store.Config.Profiles.Add(profile);
@@ -2996,7 +3108,7 @@ public sealed class ForgeDeckBridge
 
         Dispatcher.Register("settings.save", p =>
         {
-            var settings = p?.GetProperty("settings").Deserialize<AppSettings>(JsonOptions.Create(o => o.WriteIndented = false))
+            var settings = p?.GetProperty("settings").Deserialize<AppSettings>(PayloadOpts)
                 ?? throw new BridgeException("validation", "无效的设置");
             _store.Config.Settings = settings;
             _store.Save();
@@ -3053,9 +3165,12 @@ public sealed class ForgeDeckBridge
 
         Dispatcher.Register("terminal.write", p =>
         {
+            // 参数提取在 try 外：畸形请求（缺属性）应报 internal，不得误标 session-gone
+            var sessionId = p?.GetProperty("sessionId").GetString() ?? "";
+            var data = p?.GetProperty("data").GetString() ?? "";
             try
             {
-                _terminal.Write(p?.GetProperty("sessionId").GetString() ?? "", p?.GetProperty("data").GetString() ?? "");
+                _terminal.Write(sessionId, data);
             }
             catch (KeyNotFoundException)
             {
@@ -3067,10 +3182,11 @@ public sealed class ForgeDeckBridge
 
         Dispatcher.Register("terminal.resize", p =>
         {
+            var sessionId = p?.GetProperty("sessionId").GetString() ?? "";
+            var (cols, rows) = Size(p);
             try
             {
-                _terminal.Resize(p?.GetProperty("sessionId").GetString() ?? "",
-                    p?.GetProperty("cols").GetInt32() ?? 80, p?.GetProperty("rows").GetInt32() ?? 24);
+                _terminal.Resize(sessionId, cols, rows);
             }
             catch (KeyNotFoundException)
             {
@@ -3110,6 +3226,47 @@ public sealed class ForgeDeckBridge
             _store.Config.Profiles.FirstOrDefault(p => p.ToolId == t.Id)?.OpenMode
                 ?? (_store.Config.Settings.PreferEmbedded ? OpenMode.Embedded : OpenMode.External)))
         .ToList();
+
+    /// <summary>重扫合并：按 ExePath（OrdinalIgnoreCase）复用旧条目，保留 Id 与 Manual 标记——
+    /// 否则每次重扫重铸 Id，profile/lastUsed 会静默失联（autoScanOnStartup=true 时每次启动都被重置）。
+    /// 复用条目刷新展示字段（Name/Type/Source/Builtin），新路径才铸造新条目；
+    /// 非手动且未被扫到的旧条目随重扫淘汰（扫描是来源的事实来源）。仅触碰快照，不改 ConfigStore。</summary>
+    private static List<ToolInfo> MergeScanResults(List<ToolInfo> oldTools, List<ToolInfo> found)
+    {
+        var oldByPath = new Dictionary<string, ToolInfo>(StringComparer.OrdinalIgnoreCase);
+        foreach (var old in oldTools)
+            oldByPath[Path.GetFullPath(old.ExePath)] = old;
+
+        var result = oldTools.Where(t => t.Manual).ToList();
+        foreach (var fresh in found)
+        {
+            var path = Path.GetFullPath(fresh.ExePath);
+            if (oldByPath.TryGetValue(path, out var existing))
+            {
+                existing.Name = fresh.Name;
+                existing.Type = fresh.Type;
+                existing.Source = fresh.Source;
+                existing.Builtin = fresh.Builtin;
+                if (!existing.Manual) result.Add(existing);
+            }
+            else
+            {
+                result.Add(fresh);
+            }
+        }
+        return result;
+    }
+
+    private static ToolInfo CloneTool(ToolInfo t) => new()
+    {
+        Id = t.Id,
+        Name = t.Name,
+        Type = t.Type,
+        ExePath = t.ExePath,
+        Source = t.Source,
+        Builtin = t.Builtin,
+        Manual = t.Manual,
+    };
 
     private LaunchProfile ResolveProfile(string toolId, JsonElement? p)
     {
@@ -3168,7 +3325,7 @@ public sealed class ForgeDeckBridge
 
 - [ ] **步骤 3：运行测试验证通过**
 
-运行：`dotnet test --filter BridgeTests` → 预期 11 Passed。
+运行：`dotnet test --filter BridgeTests` → 预期 14 Passed。
 再跑全量：`dotnet test` → 预期全部 Passed。
 
 - [ ] **步骤 4：Commit**
@@ -3188,6 +3345,17 @@ git commit -m "feat(core): 消息桥——JSON 分发器与全部业务方法"
    - `ResultOf` 在 `using` 释放文档后返回的 `JsonElement` 不可再访问（`ObjectDisposedException`），返回前需 `Clone()`。
 5. **-32700 封包**：JSON 解析失败时 `id` 必未提取，错误封包显式用 `Error(null, ...)`（不含 id），与协议一致。
 6. 组合根顺序（任务 11 接线参考）：KnownDirs → Path → Registry → StartMenu → ExtraDirs。
+
+### 二次审查修正（健壮性，代码块已同步为最终版本）
+
+1. **HandleAsync 异常逃逸口封死**（宿主 async void 消息链上逃逸会崩进程）：入口空串/null 兜底为 -32700（`TryGetWebMessageAsString` 可能返回 null）；`method` 非 JSON 字符串时按缺失处理（-32602），不再让 `GetString()` 抛 `InvalidOperationException`；成功响应的 Utf8JsonWriter 封包段也包 try/catch 兜底为 internal。测试 `HandleAsync_NullBodyOrNonStringMethod_ReturnsErrorNotThrow`。
+2. **tools.rescan 异步化**：handler 改 async，扫描与合并包 `await Task.Run`——UI 线程同步扫描会冻结窗口并反压终端输出泵；后台只读脱离 store 的快照（`CloneTool`），不触碰 ConfigStore，合并结果回 UI 线程写回。
+3. **重扫按 ExePath 复用工具条目**：`MergeScanResults` 按 `ExePath`（OrdinalIgnoreCase）命中旧条目即复用（Id/Manual 保留），仅刷新展示字段；新路径才铸造新 Id。否则每次重扫（含 autoScanOnStartup）重铸 Id，profile/lastUsed 静默失联。测试 `Rescan_ReusesToolByPath_PreservesIdProfileAndLastUsed`。
+4. **补核心价值测试**：`TerminalCreate_WithCmdTool` 订阅 `Dispatcher.Outgoing` + TaskCompletionSource，断言 2s 内收到含该 sessionId 的 `terminal.data` 事件封包；`LaunchExternal_CmdExitZero_ReturnsPidAndRecordsUsage`（cmd.exe `/c exit 0`）断言 pid>0 且 LastUsed 更新。
+5. **write/resize 参数提取移出 try**：畸形请求（缺属性）报 internal，不误标 session-gone；resize 的 cols/rows 复用 `Size()` helper（消除死代码 `GetInt32() ?? 80`）。
+6. **PayloadOpts 静态只读实例**：profiles.save/settings.save 反序列化复用同一 options，保留 STJ 元数据缓存。
+7. **internal 错误落日志**：dispatcher 的 handler 异常与封包异常均 `Console.Error.WriteLine`（与 ToolScanner 一致）。
+8. **线程模型固化**：ForgeDeckBridge 类头注释说明 handler 默认 UI 线程串行、rescan 后台化不触碰 ConfigStore、终端事件经 Emit 透传无共享状态写入。
 
 ---
 
