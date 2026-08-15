@@ -174,7 +174,8 @@ public class BridgeTests : IDisposable
 
             var done = await Task.WhenAny(outgoing.Task, Task.Delay(TimeSpan.FromSeconds(2)));
             Assert.True(done == outgoing.Task, $"超时未收到 terminal.data 事件，累计输出：{acc}");
-            using var payload = JsonDocument.Parse(outgoing.Task.Result);
+            var message = await outgoing.Task; // 上面的断言已保证完成
+            using var payload = JsonDocument.Parse(message);
             Assert.Equal("terminal.data", payload.RootElement.GetProperty("event").GetString());
             Assert.Equal(sessionId, payload.RootElement.GetProperty("data").GetProperty("sessionId").GetString());
 
