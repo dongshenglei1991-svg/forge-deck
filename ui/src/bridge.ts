@@ -133,7 +133,7 @@ class MockBridge implements Bridge {
         this.workdirs.splice(this.workdirs.indexOf(p.path), 1);
         return this.workdirs;
       case 'sessions.list':
-        return this.sessions;
+        return [...this.sessions]; // 真实桥每次返回新 JSON 数组；副本保证 React 依赖比较生效
       case 'terminal.create':
       case 'terminal.createShell': {
         const title = method === 'terminal.createShell' ? 'pwsh' : this.tools.find((t) => t.tool.id === p.toolId)?.tool.name ?? '会话';

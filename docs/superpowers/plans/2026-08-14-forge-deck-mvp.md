@@ -3498,11 +3498,11 @@ git commit -m "feat(app): WebView2 宿主——消息桥接线/开发模式导�
 
 **文件：**
 - 创建：`ui/src/TerminalPanel.tsx`
-- 修改：`ui/src/App.tsx`
+- 修改：`ui/src/App.tsx`、`ui/src/bridge.ts`（Mock 修复一行）
 
-- [ ] **步骤 1：TerminalPanel 组件**
+- [x] **步骤 1：TerminalPanel 组件**
 
-`ui/src/TerminalPanel.tsx`：
+`ui/src/TerminalPanel.tsx`（最终实现；oklch 主题经 Chromium 151 家族真机渲染验证通过，保留 oklch，十六进制近似值留注释备用——xterm v6 默认 DOM 渲染器走 CSS 颜色，原生支持 oklch）：
 
 ```tsx
 import { useEffect, useRef } from 'react';
@@ -3512,6 +3512,8 @@ import '@xterm/xterm/css/xterm.css';
 import { bridge } from './bridge';
 import type { TerminalSessionInfo } from './types';
 
+// 若 xterm canvas 渲染不支持 oklch（表现为黑底/默认色），换成十六进制近似值：
+// background '#0d1211'、foreground '#b8c4bf'、cursor '#8fe3b0'、cursorAccent '#0d1211'
 const THEME = {
   background: 'oklch(13% 0.02 170)',
   foreground: 'oklch(78% 0.02 170)',
@@ -3527,7 +3529,7 @@ export function TerminalPanel({ sessions, activeId, onActivate, onNewSession, on
   onNewSession: () => void;
   onCloseSession: (id: string) => void;
 }) {
-  const terms = useRef(new Map<string, { term: Terminal; fit: FitAddon; container: HTMLDivElement }>());
+  const terms = useRef(new Map<string, { term: Terminal; fit: FitAddon }>());
   const containers = useRef(new Map<string, HTMLDivElement>());
   const observers = useRef(new Map<string, ResizeObserver>());
 
@@ -3559,21 +3561,23 @@ export function TerminalPanel({ sessions, activeId, onActivate, onNewSession, on
       term.open(container);
       try { fit.fit(); } catch { /* 容器尺寸为 0 时忽略 */ }
       bridge.request('terminal.resize', { sessionId: id, cols: term.cols, rows: term.rows }).catch(() => {});
-      term.onData((data) => bridge.request('terminal.write', { sessionId: id, data }).catch(() => {}));
+      term.onData((data) => bridge.request('terminal.write', { sessionId: id, data }).catch(() => {
+        // session-gone：关标签瞬间的在途写入是良性竞态，静默忽略
+      }));
       const observer = new ResizeObserver(() => {
         if (container.offsetParent === null) return;
         try { fit.fit(); } catch { return; }
         bridge.request('terminal.resize', { sessionId: id, cols: term.cols, rows: term.rows }).catch(() => {});
       });
       observer.observe(container);
-      terms.current.set(id, { term, fit, container });
+      terms.current.set(id, { term, fit });
       observers.current.set(id, observer);
     }
   }, [sessions]);
 
   useEffect(() => {
     const entry = activeId ? terms.current.get(activeId) : null;
-    if (entry && entry.container.offsetParent !== null)
+    if (entry && entry.fit)
       requestAnimationFrame(() => { try { entry.fit.fit(); } catch { /* 忽略 */ } });
   }, [activeId, sessions]);
 
@@ -3602,11 +3606,9 @@ export function TerminalPanel({ sessions, activeId, onActivate, onNewSession, on
 }
 ```
 
-- [ ] **步骤 2：App 接入会话状态**
+- [x] **步骤 2：App 接入会话状态**
 
-`ui/src/App.tsx` 中（在任务 3 的壳基础上增量修改）：
-
-新增 import 与状态：
+`ui/src/App.tsx` 新增 import：
 
 ```tsx
 import { useCallback, useEffect, useState } from 'react';
@@ -3615,7 +3617,7 @@ import { TerminalPanel } from './TerminalPanel';
 import type { TerminalSessionInfo } from './types';
 ```
 
-组件体内：
+组件体内新增状态与处理（最终实现；自动选中 effect 同时覆盖"activeId 为空"与"activeId 已失效（关闭了当前激活标签）"两种情况——后者为联调中发现的实际 bug 修复）：
 
 ```tsx
 const [sessions, setSessions] = useState<TerminalSessionInfo[]>([]);
@@ -3625,10 +3627,14 @@ const refreshSessions = useCallback(async () => {
   setSessions(await bridge.request<TerminalSessionInfo[]>('sessions.list'));
 }, []);
 
+useEffect(() => { refreshSessions(); }, [refreshSessions]);
+
 useEffect(() => bridge.on('sessions.changed', () => { refreshSessions(); }), [refreshSessions]);
 
 useEffect(() => {
-  if (activeSessionId == null && sessions.length > 0) setActiveSessionId(sessions[0].sessionId);
+  // activeId 为空或已失效（如关闭了当前激活标签）时，自动选中第一个会话
+  if (sessions.length > 0 && !sessions.some((s) => s.sessionId === activeSessionId))
+    setActiveSessionId(sessions[0].sessionId);
 }, [sessions, activeSessionId]);
 
 const handleNewShell = useCallback(async () => {
@@ -3636,7 +3642,9 @@ const handleNewShell = useCallback(async () => {
     const { sessionId } = await bridge.request<{ sessionId: string }>('terminal.createShell', { cols: 120, rows: 30 });
     setActiveSessionId(sessionId);
     await refreshSessions();
-  } catch (e: any) { console.error(e); } // Toast 在任务 16 接入
+  } catch (e) {
+    console.error('新建会话失败', e); // Toast 在任务 16 接入
+  }
 }, [refreshSessions]);
 
 const handleCloseSession = useCallback(async (id: string) => {
@@ -3645,30 +3653,30 @@ const handleCloseSession = useCallback(async (id: string) => {
 }, [refreshSessions]);
 ```
 
-把任务 3 的终端占位 `<section className="terminal">…</section>` 替换为：
+终端占位 `<section className="terminal">…</section>` 替换为：
 
 ```tsx
 <TerminalPanel sessions={sessions} activeId={activeSessionId}
   onActivate={setActiveSessionId} onNewSession={handleNewShell} onCloseSession={handleCloseSession} />
 ```
 
-并在启动 effect 里加 `refreshSessions()`（任务 13 会统一整理启动加载）。
+附带修复（`ui/src/bridge.ts` MockBridge 一行）：`sessions.list` 原返回内部数组的同一引用，React `setSessions` 因引用相同跳过重渲染、`[sessions]` effect 依赖不触发（真实桥每次返回新 JSON 数组，不受影响）。改为 `return [...this.sessions]; // 真实桥每次返回新 JSON 数组；副本保证 React 依赖比较生效`。
 
-- [ ] **步骤 3：构建与真机联调验证**
+- [x] **步骤 3：构建与验证**
 
-运行：`cd ui && npm run build` → `✓ built`。
-联调（`npm run dev` + `FORGEDECK_DEV=1 dotnet run --project src/ForgeDeck.App`）：
-1. 点终端区 `+` 新建标签 → 出现 pwsh/cmd 提示符（真实 ConPTY）。
-2. 敲 `echo forge-e2e` 回车 → 输出回显。
-3. 拖动窗口宽度 → 终端随宽重排（FitAddon + resize）。
-4. 点标签 `×` → 标签与实例销毁。
-5. 关闭应用窗口 → 若有运行中会话弹确认框。
+1. `cd ui && npm run build` → `✓ built`（xterm 体积触发 >500kB chunk 提示，属预期告警）；`npm run lint` 0 警告 0 错误；`dotnet test` 76/76 绿。
+2. WebView2 真机联调在本机受阻（环境问题，非代码问题）：msedgewebview2 浏览器进程在任何用户态应用下都无法派生（独立 WinForms+WebView2 最小复现确认，`CreateCoreWebView2ControllerAsync` 永久挂起、零子进程；同机 SearchHost/GameViewer 等系统级 WebView2 实例正常；headless msedge 本身可运行）。已尝试：--proxy-server=direct（旁路系统代理 127.0.0.1:10808 对 localhost 的劫持）、vite 绑定 127.0.0.1（原仅 ::1）、WMI/计划任务脱离进程树启动，均无法绕过。后端 ConPTY 全链已由 76 个单测覆盖。
+3. 改用 headless Edge（Chromium 151 家族，与 WebView2 151 同引擎）+ CDP 驱动 vite dev server（MockBridge）完成 UI 真机验证：
+   - `+` 新建标签 → 出现 pwsh 标签（绿点/×/激活下划线），xterm 渲染 mock 输出两行，光标块可见；
+   - 再开第二个标签 → 切换激活态正确；点 × 关闭激活标签 → 自动重选第一个（见步骤 2 修复），标签与 term-body 实例销毁、无残留 DOM；
+   - 视口 754→900→1600 宽三档 → xterm 行宽随容器等比变化（fit 重排生效）；全部关闭 → 空态正常；
+   - 全程 console 无 error、无未捕获异常；oklch 主题实际渲染为深绿黑底 + 浅绿白字，与设计稿协调，无黑块/默认色异常——**最终保留 oklch**。
+   - pwsh 真实提示符/echo 回显路径未能在 WebView2 内直测（见 2），该链路由后端单测覆盖，待环境修复后补一次人工冒烟。
 
-- [ ] **步骤 4：Commit**
+- [x] **步骤 4：Commit**
 
 ```bash
-git add ui/src
-git commit -m "feat(ui): 内嵌终端面板——xterm 多会话/自适应尺寸/输入输出流"
+cd /c/workspace/ForgeDeck && git add ui/src && git commit -m "feat(ui): 内嵌终端面板——xterm 多会话/自适应尺寸/输入输出流"
 ```
 
 ---
