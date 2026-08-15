@@ -4456,7 +4456,13 @@ git commit -m "feat(ui): 启动配置面板——参数/工作目录控件/环�
 - 创建：`ui/src/ToolsView.tsx`、`ui/src/SessionsView.tsx`、`ui/src/SettingsView.tsx`
 - 修改：`ui/src/App.tsx`（替换三个占位视图）
 
-- [ ] **步骤 1：ToolsView**
+> **修正项（相对本计划初稿，实现时确认）：**
+> 1. SettingsView 的 `shell` 本地状态需显式 `useState<string>(...)`：初稿的 `useState(info.settings.defaultShell)` 会把状态收窄为 `'pwsh' | 'powershell' | 'cmd'` 联合类型，`setShell(e.target.value)`（string）过不了 tsc；到 `AppSettings['defaultShell']` 的收窄转换仍由 save 时的 `as` 承担。
+> 2. `handleSaveSettings` 按任务 13/14 惯例包 try/catch + console.error（失败兜底静默，Toast 任务 16 接入）；成功后 `setSettingsInfo` 回写，SettingsView 的 `[info]` effect 据此把表单回显为保存后的值。
+> 3. 设置仅影响新会话/新扫描（defaultShell 由后端在 `terminal.createShell` 读取、extraScanDirs 由扫描器读取），已开会话不受影响——无需前端额外代码，已确认。
+> 4. mock 桥 `terminal.close` 与真实后端 `Close` 一致为**移除会话**（`_sessions.Remove`），"已退出"态仅 `terminal.kill`/进程退出可达（running=false 保留在列表）；浏览器验证用临时桥补丁走 kill 路径核对"已退出 · exitCode"渲染，验证后已还原。
+
+- [x] **步骤 1：ToolsView**
 
 `ui/src/ToolsView.tsx`：
 
@@ -4498,7 +4504,7 @@ export function ToolsView({ tools, onRescan }: { tools: ToolListItem[]; onRescan
 }
 ```
 
-- [ ] **步骤 2：SessionsView**
+- [x] **步骤 2：SessionsView**
 
 `ui/src/SessionsView.tsx`：
 
@@ -4538,7 +4544,7 @@ export function SessionsView({ sessions, onNewShell }: {
 }
 ```
 
-- [ ] **步骤 3：SettingsView**
+- [x] **步骤 3：SettingsView**
 
 `ui/src/SettingsView.tsx`：
 
@@ -4550,7 +4556,7 @@ import type { AppSettings, SettingsInfo } from './types';
 export function SettingsView({ info, onSave }: { info: SettingsInfo; onSave: (s: AppSettings) => void }) {
   const [extraDirs, setExtraDirs] = useState(info.settings.extraScanDirs.join('\n'));
   const [autoScan, setAutoScan] = useState(info.settings.autoScanOnStartup);
-  const [shell, setShell] = useState(info.settings.defaultShell);
+  const [shell, setShell] = useState<string>(info.settings.defaultShell);
   const [skipExitConfirm, setSkipExitConfirm] = useState(info.settings.skipExitConfirm);
   const [preferEmbedded, setPreferEmbedded] = useState(info.settings.preferEmbedded);
 
@@ -4613,9 +4619,9 @@ export function SettingsView({ info, onSave }: { info: SettingsInfo; onSave: (s:
 
 （设计稿文案"关闭应用时保留会话"按规格修正为其实际语义"关闭应用时不弹会话确认"，其余文案与设计稿一致。）
 
-- [ ] **步骤 4：App 替换占位视图**
+- [x] **步骤 4：App 替换占位视图**
 
-`ui/src/App.tsx` 中三个占位 section 替换为：
+`ui/src/App.tsx` 中三个占位 section（现为简单 main-head）替换为：
 
 ```tsx
 <section className="view-panel" data-view-panel="tools" hidden={view !== 'tools'}>
@@ -4629,25 +4635,35 @@ export function SettingsView({ info, onSave }: { info: SettingsInfo; onSave: (s:
 </section>
 ```
 
-新增保存函数：
+新增保存函数（含修正项 2 的 try/catch）：
 
 ```tsx
 const handleSaveSettings = useCallback(async (settings: AppSettings) => {
-  setSettingsInfo(await bridge.request<SettingsInfo>('settings.save', { settings }));
+  try {
+    setSettingsInfo(await bridge.request<SettingsInfo>('settings.save', { settings }));
+  } catch (e) {
+    console.error('保存设置失败', e); // Toast 在任务 16 接入
+  }
 }, []);
 ```
 
 （补 import：`ToolsView`、`SessionsView`、`SettingsView`、类型 `AppSettings`。）
 
-- [ ] **步骤 5：构建与联调验证**
+- [x] **步骤 5：构建与联调验证**
 
-运行：`cd ui && npm run build` → `✓ built`。
-联调验证：工具库表格数据/来源标签正确；会话页卡片随内嵌启动实时出现"运行中"，kill 后变"已退出"；设置页改默认 Shell 为 `cmd` 保存 → 新建空白会话变 cmd；附加扫描目录填一个含 `claude.cmd` 的目录 → 重新扫描后出现该工具（来源=附加目录）；开关"关闭应用时不弹会话确认"后退出不再弹确认。
+1. `cd ui && npm run build` → `✓ built`；`npm run lint` → 0 警告 0 错误。
+2. 沿用任务 12/14 替代方案：headless Edge（Edg/151）+ CDP 驱动 vite preview（MockBridge，127.0.0.1），逐项验证全过：
+   - **工具库**：表头 5 列（工具/可执行文件/来源/默认方式/状态），mock 4 行渲染（Claude Code=内嵌终端、Cursor Agent=独立窗口、均"已安装"）；点"扫描本机工具"→ 视图切回 launcher 且扫描态触发（40ms 间隔采样：t=40–160ms "正在扫描…"、重新扫描按钮 disabled，t=200ms 起"自动扫描 · 已完成"）。
+   - **会话**：初始空态文案"暂无会话。启动工具或新建空白会话后在此查看。"；新建空白会话 → 卡片出现（标题 pwsh/workdir/运行中），终端面板同步出标签；点标签 × → mock close **移除**会话（与真实后端 Close 语义一致），卡片消失、空态恢复；"已退出"渲染经临时桥补丁走 `terminal.kill`（running=false + exitCode=1）核对 → 卡片保留且显示"已退出 · 1"，验证后补丁已还原（见修正项 4）。
+   - **设置**：两卡（工具发现/终端偏好）+ 附加扫描目录文本域 + 三开关（启动时自动扫描=on/关闭应用时不弹会话确认=off/优先使用内嵌终端=on）+ 默认 Shell 输入渲染；改 defaultShell 为 `cmd`、填两行附加目录、关自动扫描 → 保存 → `settings.get` 回读 `defaultShell=cmd`、`autoScanOnStartup=false`、`extraScanDirs` 两行按 trim/去空行解析，且输入框/开关立即回显新值（SettingsView `[info]` effect 生效），未提交字段（maxWorkdirHistory 等）经 `...info.settings` 展开保留。
+   - **term-hidden 回归**：工具库与设置视图根节点均为 `app term-hidden`，会话视图为 `app`（按设计保留终端面板）。
+   - **视觉对照**（设计稿 66-83 行）：三视图截图经视觉模型核对——eyebrow/title/sub/按钮文案、表格结构与 4 行数据、会话卡（标题+mono 路径+状态）、设置卡（文本域/输入框/三开关/右下 primary 保存按钮）均与设计稿一致；布局探针：三视图均无横向溢出，session-grid/settings-grid 实测两等宽列（478px×2），data-table 968px 贴合 970px 面板。
+3. mock 限制（注明）：`settings.save` 仅持久于内存，页面刷新即重置（刷新后实测 autoScan 回 true、defaultShell 回 pwsh），"关闭自动扫描 → 刷新后启动走 tools.list"与"附加扫描目录 → 重扫出现新工具（来源=附加目录）"两条依赖持久化/真实扫描器的链路无法在 mock 下验证，由后端单测（ConfigStore 持久化、扫描器 extraScanDirs 合并）覆盖，任务 16 真机验收时复核；mock 的 `terminal.createShell` 标题硬编码 pwsh，"改 cmd → 新会话标题变 cmd"同属真机项（真实桥读 `Settings.DefaultShell`）。
 
-- [ ] **步骤 6：Commit**
+- [x] **步骤 6：Commit**
 
 ```bash
-git add ui/src
+cd /c/workspace/ForgeDeck && git add ui/src docs/superpowers/plans/2026-08-14-forge-deck-mvp.md
 git commit -m "feat(ui): 工具库/终端会话/设置视图接入真实数据"
 ```
 

@@ -1,0 +1,66 @@
+import { useEffect, useState } from 'react';
+import { Switch } from './Switch';
+import type { AppSettings, SettingsInfo } from './types';
+
+export function SettingsView({ info, onSave }: { info: SettingsInfo; onSave: (s: AppSettings) => void }) {
+  const [extraDirs, setExtraDirs] = useState(info.settings.extraScanDirs.join('\n'));
+  const [autoScan, setAutoScan] = useState(info.settings.autoScanOnStartup);
+  const [shell, setShell] = useState<string>(info.settings.defaultShell);
+  const [skipExitConfirm, setSkipExitConfirm] = useState(info.settings.skipExitConfirm);
+  const [preferEmbedded, setPreferEmbedded] = useState(info.settings.preferEmbedded);
+
+  useEffect(() => {
+    setExtraDirs(info.settings.extraScanDirs.join('\n'));
+    setAutoScan(info.settings.autoScanOnStartup);
+    setShell(info.settings.defaultShell);
+    setSkipExitConfirm(info.settings.skipExitConfirm);
+    setPreferEmbedded(info.settings.preferEmbedded);
+  }, [info]);
+
+  const save = () => onSave({
+    ...info.settings,
+    defaultShell: (shell.trim() || 'pwsh') as AppSettings['defaultShell'],
+    autoScanOnStartup: autoScan,
+    extraScanDirs: extraDirs.split(/\r?\n/).map((s) => s.trim()).filter(Boolean),
+    skipExitConfirm,
+    preferEmbedded,
+  });
+
+  return (
+    <>
+      <div className="main-head">
+        <div>
+          <p className="eyebrow">SYSTEM PREFERENCES / 04</p>
+          <h1 className="title">设置</h1>
+          <p className="sub">调整扫描范围、终端行为和启动器偏好。</p>
+        </div>
+      </div>
+      <div className="settings-grid">
+        <article className="setting-card">
+          <h2>工具发现</h2>
+          <p>控制启动器自动检查的本机位置。</p>
+          <div className="field">
+            <label htmlFor="scanPaths">附加扫描目录</label>
+            <textarea className="textarea" id="scanPaths" value={extraDirs}
+              onChange={(e) => setExtraDirs(e.target.value)} />
+          </div>
+          <Switch on={autoScan} label="启动时自动扫描" onToggle={() => setAutoScan((v) => !v)} />
+        </article>
+        <article className="setting-card">
+          <h2>终端偏好</h2>
+          <p>设置新会话的默认 Shell 与运行方式。</p>
+          <div className="field">
+            <label htmlFor="defaultShell">默认 Shell（pwsh / powershell / cmd）</label>
+            <input className="input mono" id="defaultShell" value={shell}
+              onChange={(e) => setShell(e.target.value)} />
+          </div>
+          <Switch on={skipExitConfirm} label="关闭应用时不弹会话确认" onToggle={() => setSkipExitConfirm((v) => !v)} />
+          <Switch on={preferEmbedded} label="优先使用内嵌终端" onToggle={() => setPreferEmbedded((v) => !v)} />
+        </article>
+      </div>
+      <div className="setting-actions">
+        <button className="btn primary" onClick={save}>保存设置</button>
+      </div>
+    </>
+  );
+}

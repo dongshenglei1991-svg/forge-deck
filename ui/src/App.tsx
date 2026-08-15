@@ -7,7 +7,10 @@ import { TerminalPanel } from './TerminalPanel';
 import { AddToolModal } from './AddToolModal';
 import { ConfigPanel } from './ConfigPanel';
 import { FolderPickerModal } from './FolderPickerModal';
-import type { AppInfo, LaunchProfile, SettingsInfo, TerminalSessionInfo, ToolListItem } from './types';
+import { ToolsView } from './ToolsView';
+import { SessionsView } from './SessionsView';
+import { SettingsView } from './SettingsView';
+import type { AppInfo, AppSettings, LaunchProfile, SettingsInfo, TerminalSessionInfo, ToolListItem } from './types';
 
 const VIEW_TITLES: Record<View, string> = { launcher: '快速启动', tools: '工具库', sessions: '终端会话', settings: '设置' };
 
@@ -132,6 +135,14 @@ export default function App() {
     await refreshSessions();
   }, [refreshSessions]);
 
+  const handleSaveSettings = useCallback(async (settings: AppSettings) => {
+    try {
+      setSettingsInfo(await bridge.request<SettingsInfo>('settings.save', { settings }));
+    } catch (e) {
+      console.error('保存设置失败', e); // Toast 在任务 16 接入
+    }
+  }, []);
+
   const termHidden = view === 'tools' || view === 'settings';
   const selectedTool = tools.find((t) => t.tool.id === selectedToolId) ?? null;
 
@@ -160,13 +171,13 @@ export default function App() {
             )} />
         </section>
         <section className="view-panel" data-view-panel="tools" hidden={view !== 'tools'}>
-          <div className="main-head"><h1 className="title">工具库</h1></div>
+          <ToolsView tools={tools} onRescan={() => { setView('launcher'); handleRescan(); }} />
         </section>
         <section className="view-panel" data-view-panel="sessions" hidden={view !== 'sessions'}>
-          <div className="main-head"><h1 className="title">终端会话</h1></div>
+          <SessionsView sessions={sessions} onNewShell={handleNewShell} />
         </section>
         <section className="view-panel" data-view-panel="settings" hidden={view !== 'settings'}>
-          <div className="main-head"><h1 className="title">设置</h1></div>
+          {settingsInfo && <SettingsView info={settingsInfo} onSave={handleSaveSettings} />}
         </section>
       </main>
       <TerminalPanel sessions={sessions} activeId={activeSessionId}
