@@ -57,10 +57,13 @@ public class TerminalSessionManagerTests : IDisposable
     [Fact]
     public async Task Create_SpaceInArgument_SurvivesCommandLine()
     {
-        // Porta.Pty 负责给参数数组加引号：含空格参数应完整到达子进程
+        // verbatim 模式 Porta 不加引号，引号由管理器的 QuoteIfSpaced 自行添加；
+        // 含连续双空格的参数作单 token 到达时，cmd echo 原样回显带引号原文（"forge  deck"）。
+        // 实测：cmd echo 不重 join、不折叠空格——引号丢失（参数裂开）时回显不含引号，
+        // 故断言带引号 + 双空格才真正可捕捉 QuoteIfSpaced 被误删的回归。
         var id = await _mgr.CreateAsync("echo2", CmdExe,
-            new[] { "/c", "echo", "forge deck spaced" }, Path.GetTempPath());
-        await WaitForOutputAsync(_mgr, id, acc => acc.Contains("forge deck spaced"), TimeSpan.FromSeconds(10));
+            new[] { "/c", "echo", "forge  deck" }, Path.GetTempPath());
+        await WaitForOutputAsync(_mgr, id, acc => acc.Contains("\"forge  deck\""), TimeSpan.FromSeconds(10));
         await WaitForExitAsync(_mgr, id, TimeSpan.FromSeconds(10));
     }
 

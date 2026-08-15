@@ -2249,10 +2249,13 @@ public class TerminalSessionManagerTests : IDisposable
     [Fact]
     public async Task Create_SpaceInArgument_SurvivesCommandLine()
     {
-        // Porta.Pty 负责给参数数组加引号：含空格参数应完整到达子进程
+        // verbatim 模式 Porta 不加引号，引号由管理器的 QuoteIfSpaced 自行添加；
+        // 含连续双空格的参数作单 token 到达时，cmd echo 原样回显带引号原文（"forge  deck"）。
+        // 实测：cmd echo 不重 join、不折叠空格——引号丢失（参数裂开）时回显不含引号，
+        // 故断言带引号 + 双空格才真正可捕捉 QuoteIfSpaced 被误删的回归。
         var id = await _mgr.CreateAsync("echo2", CmdExe,
-            new[] { "/c", "echo", "forge deck spaced" }, Path.GetTempPath());
-        await WaitForOutputAsync(_mgr, id, acc => acc.Contains("forge deck spaced"), TimeSpan.FromSeconds(10));
+            new[] { "/c", "echo", "forge  deck" }, Path.GetTempPath());
+        await WaitForOutputAsync(_mgr, id, acc => acc.Contains("\"forge  deck\""), TimeSpan.FromSeconds(10));
         await WaitForExitAsync(_mgr, id, TimeSpan.FromSeconds(10));
     }
 
@@ -2342,8 +2345,9 @@ public sealed class TerminalSessionManager : IDisposable
         string title, string app, IReadOnlyList<string> args, string workdir,
         IReadOnlyDictionary<string, string>? env = null, int cols = 120, int rows = 30)
     {
-        // 合并全量环境变量，避免子进程丢 PATH 等基础变量
-        var merged = new Dictionary<string, string>();
+        // 合并全量环境变量，避免子进程丢 PATH 等基础变量；
+        // 忽略大小写去重（Windows 环境变量名不区分大小写），同名时用户值覆盖继承值
+        var merged = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (DictionaryEntry e in Environment.GetEnvironmentVariables())
             merged[(string)e.Key] = (string)e.Value!;
         if (env != null)
@@ -2409,7 +2413,11 @@ public sealed class TerminalSessionManager : IDisposable
                 if (read <= 0) break;
                 var count = decoder.GetChars(buffer, 0, read, chars, 0);
                 if (count > 0)
-                    Output?.Invoke(session.Id, new string(chars, 0, count));
+                {
+                    // 订阅者异常不得杀死输出泵（否则该会话剩余输出永久丢失）
+                    try { Output?.Invoke(session.Id, new string(chars, 0, count)); }
+                    catch { }
+                }
             }
         }
         catch (ObjectDisposedException) { }
@@ -2526,8 +2534,18 @@ public sealed class TerminalSessionManager : IDisposable
         public string Workdir { get; } = workdir;
         public DateTime StartedAt { get; } = DateTime.UtcNow;
         public IPtyConnection Connection { get; } = connection;
-        public bool Running { get; private set; } = true;
-        public int ExitCode { get; private set; } = -1;
+
+        private bool _running = true;
+
+        /// <summary>跨线程可见：ExitCode 先写、Running 后写（release），读侧见 Running=false 即可见 ExitCode。</summary>
+        public bool Running
+        {
+            get => Volatile.Read(ref _running);
+            private set => Volatile.Write(ref _running, value);
+        }
+
+        private int _exitCode = -1;
+        public int ExitCode { get => _exitCode; private set => _exitCode = value; }
 
         /// <summary>记录退出状态；返回 false 表示已报过（防 Porta 事件与主动补报双发）。</summary>
         public bool TryMarkExited(int exitCode)
@@ -2561,6 +2579,13 @@ git commit -m "feat(core): ConPTY 终端会话管理器（输出流/输入/resiz
 1. **参数引号**：非 verbatim 模式 Porta 给**每个**参数加引号（`"/c" "echo hi"`），cmd.exe 无法解析（实测 `'"echo hi' 不是内部或外部命令`、退出码 1；含空格 App 路径同样失败）。修复：`VerbatimCommandLine = true` + 自行按 Windows 惯例仅给含空白参数加引号（与 `LaunchService.QuoteIfSpaced` 一致）；App 路径引号由 Porta 始终负责（带空格路径实测通过）。
 2. **Close 的 Dispose 顺序**：`PseudoConsoleConnection.Dispose()` 第一步就 `process.Exited -= handler`，Kill 后立即 Dispose 则 ProcessExited 永不触发；且 `Process.WaitForExit(ms)` 会在调用线程上**同步**触发 Process.Exited，而调用方在 `Close` 返回后才订阅 `Exited`——同步触发必然错过。修复：Close 移除会话后由后台任务执行 kill → 有界 WaitForExit(2s) → 补报（若事件未达）→ Dispose；`Session.TryMarkExited` 用 Interlocked 保证 Exited 恰好一次（Porta 事件与补报竞争安全）。
 3. 顺带加固：输出泵用有状态 UTF-8 Decoder（跨 chunk 多字节序列不裂成 U+FFFD）；CreateAsync 订阅后 `WaitForExit(0)` 探测"订阅前已退出"的竞态并补报。
+
+- [x] **步骤 6（质量审查加固）：**
+
+1. 【Important】`Create_SpaceInArgument_SurvivesCommandLine` 断言强化：参数改含连续双空格（`forge  deck`）。实测 cmd echo **不重 join、不折叠空格**——引号丢失时双空格仍在，单靠 `Contains` 无法区分；而参数作单 token（带引号）到达时 echo 原样回显**含引号**原文，故断言定为 `Contains("\"forge  deck\"")`（带引号 + 双空格）。变异验证：临时删除 QuoteIfSpaced 的加引号逻辑，该测试立刻红。注释同步更正（verbatim 模式 Porta 不加引号，引号由 QuoteIfSpaced 自行添加）。
+2. 【Minor】输出泵 `Output?.Invoke` 包 try/catch：订阅者异常不得杀死泵（否则该会话剩余输出永久丢失）。
+3. 【Minor】merged 环境字典用 `StringComparer.OrdinalIgnoreCase` 初始化：避免 `Path`/`path` 类大小写变体重复键，同名时用户值覆盖继承值。
+4. 【Minor】`Session.Running` 改 `Volatile.Read`/`Volatile.Write`：补齐跨线程可见性；写入顺序 ExitCode 先、Running（release）后，读侧见 `Running=false` 即可见最终 ExitCode。
 
 ---
 

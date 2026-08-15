@@ -24,8 +24,9 @@ public sealed class TerminalSessionManager : IDisposable
         string title, string app, IReadOnlyList<string> args, string workdir,
         IReadOnlyDictionary<string, string>? env = null, int cols = 120, int rows = 30)
     {
-        // 合并全量环境变量，避免子进程丢 PATH 等基础变量
-        var merged = new Dictionary<string, string>();
+        // 合并全量环境变量，避免子进程丢 PATH 等基础变量；
+        // 忽略大小写去重（Windows 环境变量名不区分大小写），同名时用户值覆盖继承值
+        var merged = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (DictionaryEntry e in Environment.GetEnvironmentVariables())
             merged[(string)e.Key] = (string)e.Value!;
         if (env != null)
@@ -91,7 +92,11 @@ public sealed class TerminalSessionManager : IDisposable
                 if (read <= 0) break;
                 var count = decoder.GetChars(buffer, 0, read, chars, 0);
                 if (count > 0)
-                    Output?.Invoke(session.Id, new string(chars, 0, count));
+                {
+                    // 订阅者异常不得杀死输出泵（否则该会话剩余输出永久丢失）
+                    try { Output?.Invoke(session.Id, new string(chars, 0, count)); }
+                    catch { }
+                }
             }
         }
         catch (ObjectDisposedException) { }
@@ -208,8 +213,18 @@ public sealed class TerminalSessionManager : IDisposable
         public string Workdir { get; } = workdir;
         public DateTime StartedAt { get; } = DateTime.UtcNow;
         public IPtyConnection Connection { get; } = connection;
-        public bool Running { get; private set; } = true;
-        public int ExitCode { get; private set; } = -1;
+
+        private bool _running = true;
+
+        /// <summary>跨线程可见：ExitCode 先写、Running 后写（release），读侧见 Running=false 即可见 ExitCode。</summary>
+        public bool Running
+        {
+            get => Volatile.Read(ref _running);
+            private set => Volatile.Write(ref _running, value);
+        }
+
+        private int _exitCode = -1;
+        public int ExitCode { get => _exitCode; private set => _exitCode = value; }
 
         /// <summary>记录退出状态；返回 false 表示已报过（防 Porta 事件与主动补报双发）。</summary>
         public bool TryMarkExited(int exitCode)
