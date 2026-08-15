@@ -3702,7 +3702,7 @@ git commit -m "fix(ui): 会话激活时序回归与早到输出缓冲"
 - 创建：`ui/src/LauncherView.tsx`、`ui/src/ToolListPanel.tsx`、`ui/src/Modal.tsx`、`ui/src/AddToolModal.tsx`、`ui/src/lib/format.ts`
 - 修改：`ui/src/App.tsx`（本任务引入数据加载主线，替换 launcher 占位）
 
-- [ ] **步骤 1：工具函数**
+- [x] **步骤 1：工具函数**
 
 `ui/src/lib/format.ts`：
 
@@ -3724,7 +3724,7 @@ export function baseName(path: string): string {
 }
 ```
 
-- [ ] **步骤 2：Modal 基座（含 Esc/关闭动画）**
+- [x] **步骤 2：Modal 基座（含 Esc/关闭动画）**
 
 `ui/src/Modal.tsx`：
 
@@ -3765,7 +3765,7 @@ export function Modal({ open, onClose, title, subtitle, wide, children }: {
 }
 ```
 
-- [ ] **步骤 3：AddToolModal**
+- [x] **步骤 3：AddToolModal**
 
 `ui/src/AddToolModal.tsx`：
 
@@ -3811,7 +3811,7 @@ export function AddToolModal({ open, onClose, onConfirm }: {
 }
 ```
 
-- [ ] **步骤 4：ToolListPanel**
+- [x] **步骤 4：ToolListPanel**
 
 `ui/src/ToolListPanel.tsx`：
 
@@ -3865,7 +3865,7 @@ export function ToolListPanel({ tools, scanning, selectedToolId, onSelect, onRes
 }
 ```
 
-- [ ] **步骤 5：LauncherView（指标区 + 双栏骨架）**
+- [x] **步骤 5：LauncherView（指标区 + 双栏骨架）**
 
 `ui/src/LauncherView.tsx`（右侧配置面板任务 14 再放，本任务先渲染占位面板保持布局完整）：
 
@@ -3924,9 +3924,17 @@ export function LauncherView({ tools, scanning, selectedToolId, sessions, appInf
 }
 ```
 
-- [ ] **步骤 6：App 接入数据主线**
+- [x] **步骤 6：App 接入数据主线**
 
-`ui/src/App.tsx` 更新（关键增量；与任务 12 的会话代码合并后的完整形态）：
+`ui/src/App.tsx` 更新（关键增量；与任务 12 的会话代码合并后的完整形态）。
+
+**实现时修正（相对下文初稿，最终代码块已同步为实际实现）：**
+
+1. `refreshSessions` 保留任务 12 的实现（含 activeId 校正逻辑），不回退为初稿的简单版本；因此初稿里多余的 `useEffect(activeSessionId == null → 选首个)` 补正 effect 删除——任务 12 的 refreshSessions 已在数据到达时校正。
+2. 任务 12 的 `useEffect(() => { refreshSessions(); })` 与 `useEffect(() => bridge.on('sessions.changed', ...))` 并入本步骤的单一启动 effect（订阅在 effect 体内同步注册，异步加载期间的 sessions.changed 事件不丢），避免启动期重复请求。
+3. `handleNewShell` 保留任务 12 引入的 try/catch + console.error（任务 16 换 Toast）。
+4. `workdirs`/`profile` 的值在本任务尚无读取方（任务 14 的 FolderPicker/ConfigPanel 才读），strict + noUnusedLocals/oxlint no-unused-vars 会报错——暂以 `_workdirs`/`_profile` 命名豁免并加注释，任务 14 恢复具名读取。
+5. rescan 分支内层 `setAppInfo(…)` 增加 `if (!disposed)` 守卫；`finally` 复位 scanning 覆盖失败/卸载路径。
 
 ```tsx
 import { useCallback, useEffect, useState } from 'react';
@@ -3946,15 +3954,19 @@ export default function App() {
   const [sessions, setSessions] = useState<TerminalSessionInfo[]>([]);
   const [settingsInfo, setSettingsInfo] = useState<SettingsInfo | null>(null);
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null);
-  const [workdirs, setWorkdirs] = useState<string[]>([]);
+  // 值自任务 14（FolderPicker 读 workdirs、ConfigPanel 以 profile.id 作重置依赖）起被读取，暂以 _ 前缀豁免未用检查
+  const [_workdirs, setWorkdirs] = useState<string[]>([]);
   const [selectedToolId, setSelectedToolId] = useState<string | null>(null);
-  const [profile, setProfile] = useState<LaunchProfile | null>(null);
+  const [_profile, setProfile] = useState<LaunchProfile | null>(null);
   const [scanning, setScanning] = useState(false);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
 
   const refreshSessions = useCallback(async () => {
-    setSessions(await bridge.request<TerminalSessionInfo[]>('sessions.list'));
+    const list = await bridge.request<TerminalSessionInfo[]>('sessions.list');
+    setSessions(list);
+    // 数据到达期一并校正激活：cur 仍有效则保留（新建标签的显式 set 不被旧列表回退），失效则选剩余首个，全关归 null
+    setActiveSessionId((cur) => (cur && list.some((s) => s.sessionId === cur) ? cur : list[0]?.sessionId ?? null));
   }, []);
   const refreshWorkdirs = useCallback(async () => {
     setWorkdirs(await bridge.request<string[]>('workdirs.list'));
@@ -3965,6 +3977,7 @@ export default function App() {
     setProfile(await bridge.request<LaunchProfile>('profiles.get', { toolId }));
   }, []);
 
+  // 启动主线（合并任务 12 的会话初始拉取与订阅，避免重复请求）：appInfo/settings → 按设置决定 rescan 或 list → 会话/工作目录 → 选中 preferred 工具
   useEffect(() => {
     let disposed = false;
     (async () => {
@@ -3980,8 +3993,8 @@ export default function App() {
         setScanning(true);
         try {
           list = await bridge.request<ToolListItem[]>('tools.rescan');
-          setAppInfo(await bridge.request<AppInfo>('app.info'));
-        } finally { setScanning(false); }
+          if (!disposed) setAppInfo(await bridge.request<AppInfo>('app.info'));
+        } finally { setScanning(false); } // 失败/卸载均复位扫描态
       } else {
         list = await bridge.request<ToolListItem[]>('tools.list');
       }
@@ -3995,10 +4008,6 @@ export default function App() {
     const off = bridge.on('sessions.changed', () => { refreshSessions(); });
     return () => { disposed = true; off(); };
   }, [refreshSessions, refreshWorkdirs, selectTool]);
-
-  useEffect(() => {
-    if (activeSessionId == null && sessions.length > 0) setActiveSessionId(sessions[0].sessionId);
-  }, [sessions, activeSessionId]);
 
   const handleRescan = useCallback(async () => {
     setScanning(true);
@@ -4015,9 +4024,13 @@ export default function App() {
   }, []);
 
   const handleNewShell = useCallback(async () => {
-    const { sessionId } = await bridge.request<{ sessionId: string }>('terminal.createShell', { cols: 120, rows: 30 });
-    setActiveSessionId(sessionId);
-    await refreshSessions();
+    try {
+      const { sessionId } = await bridge.request<{ sessionId: string }>('terminal.createShell', { cols: 120, rows: 30 });
+      setActiveSessionId(sessionId);
+      await refreshSessions();
+    } catch (e) {
+      console.error('新建会话失败', e); // Toast 在任务 16 接入
+    }
   }, [refreshSessions]);
 
   const handleCloseSession = useCallback(async (id: string) => {
@@ -4068,12 +4081,12 @@ export default function App() {
 }
 ```
 
-- [ ] **步骤 7：构建与联调验证**
+- [x] **步骤 7：构建与联调验证**
 
 运行：`cd ui && npm run build` → `✓ built`。
 联调验证：启动后自动扫描（真实机器应识别出本机已装的已知工具）；三个指标卡显示真实数据；点"手动添加工具"填一个不存在的路径 → 弹窗内显示错误；填 `C:\Windows\System32\cmd.exe` 名称 `Cmd 手动` → 列表新增；顶栏刷新按钮触发重扫。
 
-- [ ] **步骤 8：Commit**
+- [x] **步骤 8：Commit**
 
 ```bash
 git add ui/src
