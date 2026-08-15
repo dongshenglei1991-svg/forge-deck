@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Modal } from './Modal';
 
 export function AddToolModal({ open, onClose, onConfirm }: {
@@ -8,13 +8,19 @@ export function AddToolModal({ open, onClose, onConfirm }: {
   const [name, setName] = useState('');
   const [path, setPath] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  // 每次打开都复位，避免上次的错误/输入残留
+  useEffect(() => {
+    if (open) { setName(''); setPath(''); setError(null); setSubmitting(false); }
+  }, [open]);
 
   const submit = async () => {
     if (!name.trim() || !path.trim()) { setError('请填写工具名称与可执行文件路径'); return; }
+    setSubmitting(true);
     try {
       await onConfirm(name.trim(), path.trim());
-      setName(''); setPath(''); setError(null);
-    } catch (e: any) { setError(e.message); }
+    } catch (e: any) { setError(e.message); setSubmitting(false); }
   };
 
   return (
@@ -32,7 +38,9 @@ export function AddToolModal({ open, onClose, onConfirm }: {
       {error && <p style={{ color: '#e5484d', fontSize: 12, margin: '0 0 8px' }}>{error}</p>}
       <div className="modal-foot">
         <button className="btn" onClick={onClose}>取消</button>
-        <button className="btn primary" onClick={submit}>添加到工具库</button>
+        <button className="btn primary" onClick={submit} disabled={submitting}>
+          {submitting ? '添加中…' : '添加到工具库'}
+        </button>
       </div>
     </Modal>
   );

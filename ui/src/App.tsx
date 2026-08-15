@@ -75,6 +75,8 @@ export default function App() {
     try {
       setTools(await bridge.request<ToolListItem[]>('tools.rescan'));
       setAppInfo(await bridge.request<AppInfo>('app.info'));
+    } catch (e) {
+      console.error('重新扫描失败', e); // Toast 在任务 16 接入
     } finally { setScanning(false); }
   }, []);
 
