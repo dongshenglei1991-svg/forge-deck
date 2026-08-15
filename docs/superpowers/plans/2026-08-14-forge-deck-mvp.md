@@ -2613,6 +2613,8 @@ public class BridgeTests : IDisposable
 {
     private readonly string _dir = Path.Combine(Path.GetTempPath(), "forgedeck-tests", Guid.NewGuid().ToString("N"));
     private readonly ConfigStore _store = null!;
+    // TerminalCreate_WithCmdTool 会 spawn 真实进程：终端必须存字段并在 Dispose 释放
+    private readonly TerminalSessionManager _terminal = new();
     private readonly ForgeDeckBridge _bridge = null!;
 
     public BridgeTests()
@@ -2623,11 +2625,12 @@ public class BridgeTests : IDisposable
         _bridge = new ForgeDeckBridge(
             _store,
             new ToolScanner(new IScanSource[] { new EmptySource() }),
-            new TerminalSessionManager());
+            _terminal);
     }
 
     public void Dispose()
     {
+        _terminal.Dispose();
         try { Directory.Delete(_dir, true); } catch { }
     }
 
@@ -2638,8 +2641,9 @@ public class BridgeTests : IDisposable
 
     private static JsonElement ResultOf(string response)
     {
+        // Clone 脱离文档生命周期：using 释放后返回的 JsonElement 仍可安全访问
         using var doc = JsonDocument.Parse(response);
-        return doc.RootElement.GetProperty("result");
+        return doc.RootElement.GetProperty("result").Clone();
     }
 
     private static (string Code, string Message)? ErrorOf(string response)
@@ -2679,7 +2683,7 @@ public class BridgeTests : IDisposable
     public async Task AddManual_InvalidPath_ReturnsValidationError()
     {
         var resp = await _bridge.Dispatcher.HandleAsync(
-            $$"""{"id":3,"method":"tools.addManual","params":{"name":"X","exePath":"{{Path.Combine(_dir, "ghost.exe").Replace("\\", "\\\\")}}"}}""");
+            $$$"""{"id":3,"method":"tools.addManual","params":{"name":"X","exePath":"{{{Path.Combine(_dir, "ghost.exe").Replace("\\", "\\\\")}}}"}}""");
         var (code, message) = ErrorOf(resp!)!.Value;
         Assert.Equal("validation", code);
         Assert.Contains("可执行文件不存在", message);
@@ -2692,7 +2696,7 @@ public class BridgeTests : IDisposable
         File.WriteAllText(exe, "");
         var exeJson = exe.Replace("\\", "\\\\");
         var resp = await _bridge.Dispatcher.HandleAsync(
-            $$"""{"id":4,"method":"tools.addManual","params":{"name":"MyTool","exePath":"{{exeJson}}"}}""");
+            $$$"""{"id":4,"method":"tools.addManual","params":{"name":"MyTool","exePath":"{{{exeJson}}}"}}""");
         var result = ResultOf(resp!);
         Assert.Equal(1, result.GetArrayLength());
         Assert.Equal("MyTool", result[0].GetProperty("tool").GetProperty("name").GetString());
@@ -2743,23 +2747,29 @@ public class BridgeTests : IDisposable
     }
 
     [Fact]
-    public async Task TerminalWrite_UnknownSession_ReturnsInternalError()
+    public async Task TerminalWrite_UnknownSession_ReturnsSessionGone()
     {
-        var resp = await _bridge.Dispatcher.HandleAsync(
+        // 关标签瞬间在途 write/resize 是良性竞态：统一映射为 session-gone，前端静默忽略
+        var writeResp = await _bridge.Dispatcher.HandleAsync(
             """{"id":10,"method":"terminal.write","params":{"sessionId":"nope","data":"x"}}""");
-        var (code, _) = ErrorOf(resp!)!.Value;
-        Assert.Equal("internal", code);
+        var (writeCode, _) = ErrorOf(writeResp!)!.Value;
+        Assert.Equal("session-gone", writeCode);
+
+        var resizeResp = await _bridge.Dispatcher.HandleAsync(
+            """{"id":11,"method":"terminal.resize","params":{"sessionId":"nope","cols":80,"rows":24}}""");
+        var (resizeCode, _) = ErrorOf(resizeResp!)!.Value;
+        Assert.Equal("session-gone", resizeCode);
     }
 
     [Fact]
     public async Task SettingsGetSave_RoundTrip()
     {
-        var getResp = await _bridge.Dispatcher.HandleAsync("""{"id":11,"method":"settings.get"}""");
+        var getResp = await _bridge.Dispatcher.HandleAsync("""{"id":12,"method":"settings.get"}""");
         var result = ResultOf(getResp!);
         Assert.True(result.GetProperty("commonDirs").GetArrayLength() > 0);
 
         var saveResp = await _bridge.Dispatcher.HandleAsync(
-            """{"id":12,"method":"settings.save","params":{"settings":{"defaultShell":"cmd","autoScanOnStartup":false,"extraScanDirs":["D:\\Tools"],"skipExitConfirm":true,"preferEmbedded":false,"maxWorkdirHistory":20}}}""");
+            """{"id":13,"method":"settings.save","params":{"settings":{"defaultShell":"cmd","autoScanOnStartup":false,"extraScanDirs":["D:\\Tools"],"skipExitConfirm":true,"preferEmbedded":false,"maxWorkdirHistory":20}}}""");
         Assert.Equal("cmd", ResultOf(saveResp!).GetProperty("settings").GetProperty("defaultShell").GetString());
         Assert.False(_store.Config.Settings.AutoScanOnStartup);
         Assert.True(_store.Config.Settings.SkipExitConfirm);
@@ -2769,8 +2779,8 @@ public class BridgeTests : IDisposable
     public async Task Workdirs_AddAndList()
     {
         await _bridge.Dispatcher.HandleAsync(
-            $$"""{"id":13,"method":"workdirs.add","params":{"path":"{{_dir.Replace("\\", "\\\\")}}"}}""");
-        var resp = await _bridge.Dispatcher.HandleAsync("""{"id":14,"method":"workdirs.list"}""");
+            $$$"""{"id":14,"method":"workdirs.add","params":{"path":"{{{_dir.Replace("\\", "\\\\")}}}"}}""");
+        var resp = await _bridge.Dispatcher.HandleAsync("""{"id":15,"method":"workdirs.list"}""");
         Assert.Equal(_dir, ResultOf(resp!)[0].GetString());
     }
 }
@@ -2830,7 +2840,8 @@ public sealed class BridgeDispatcher
         }
         catch (JsonException)
         {
-            return Error(id, "-32700", "请求不是合法 JSON");
+            // 解析失败时 id 必未提取，封包不含 id
+            return Error(null, "-32700", "请求不是合法 JSON");
         }
         if (string.IsNullOrEmpty(method)) return Error(id, "-32602", "缺少 method");
         if (!_handlers.TryGetValue(method!, out var handler))
@@ -2842,6 +2853,7 @@ public sealed class BridgeDispatcher
         catch (Exception ex) { return Error(id, "internal", ex.Message); }
         if (id == null) return null;
 
+        // 响应封包必须用 Utf8JsonWriter 回写原始 id：匿名对象序列化时 default 的 JsonElement 会抛
         using var ms = new MemoryStream();
         using (var writer = new Utf8JsonWriter(ms))
         {
@@ -3027,7 +3039,9 @@ public sealed class ForgeDeckBridge
             {
                 "pwsh" => (PathSearch.FindOnPath("pwsh")
                            ?? throw new BridgeException("not_found", "未找到 pwsh，请在设置中改用 powershell 或 cmd"), "pwsh"),
-                "powershell" => (PathSearch.FindOnPath("powershell") ?? "powershell.exe", "PowerShell"),
+                // powershell 分支复用 LaunchService 三级回退的第二、三级：PATH 上的 powershell → System32 全路径
+                "powershell" => (PathSearch.FindOnPath("powershell")
+                                 ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "powershell.exe"), "PowerShell"),
                 _ => (Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe"), "cmd"),
             };
             var (cols, rows) = Size(p);
@@ -3039,14 +3053,29 @@ public sealed class ForgeDeckBridge
 
         Dispatcher.Register("terminal.write", p =>
         {
-            _terminal.Write(p?.GetProperty("sessionId").GetString() ?? "", p?.GetProperty("data").GetString() ?? "");
+            try
+            {
+                _terminal.Write(p?.GetProperty("sessionId").GetString() ?? "", p?.GetProperty("data").GetString() ?? "");
+            }
+            catch (KeyNotFoundException)
+            {
+                // 关标签瞬间在途 write 是良性竞态：session-gone 供前端静默忽略，不弹错误
+                throw new BridgeException("session-gone", "会话已关闭");
+            }
             return Task.FromResult<object?>(null);
         });
 
         Dispatcher.Register("terminal.resize", p =>
         {
-            _terminal.Resize(p?.GetProperty("sessionId").GetString() ?? "",
-                p?.GetProperty("cols").GetInt32() ?? 80, p?.GetProperty("rows").GetInt32() ?? 24);
+            try
+            {
+                _terminal.Resize(p?.GetProperty("sessionId").GetString() ?? "",
+                    p?.GetProperty("cols").GetInt32() ?? 80, p?.GetProperty("rows").GetInt32() ?? 24);
+            }
+            catch (KeyNotFoundException)
+            {
+                throw new BridgeException("session-gone", "会话已关闭");
+            }
             return Task.FromResult<object?>(null);
         });
 
@@ -3148,6 +3177,17 @@ public sealed class ForgeDeckBridge
 git add src/ForgeDeck.Core tests/ForgeDeck.Core.Tests
 git commit -m "feat(core): 消息桥——JSON 分发器与全部业务方法"
 ```
+
+### 审查修正（实现后回填，代码块已同步为最终版本）
+
+1. **测试类释放终端**：`BridgeTests` 将 `TerminalSessionManager` 存为字段，`Dispose` 里先 `_terminal.Dispose()` 再删临时目录——`TerminalCreate_WithCmdTool` 会 spawn 真实进程，不释放会泄漏。
+2. **session-gone 错误码**：`terminal.write`/`terminal.resize` 把 `KeyNotFoundException` 转为 `BridgeException("session-gone", "会话已关闭")`。关标签瞬间在途 write 是良性竞态，前端静默忽略该码不弹错误。测试相应改为 `TerminalWrite_UnknownSession_ReturnsSessionGone`（同时覆盖 resize），替代原断言 "internal" 的版本。
+3. **createShell 的 powershell 分支**：与任务 8 的宿主解析统一，回退链改为 `PATH 上的 powershell → System32 全路径`（原计划回退到裸 `"powershell.exe"`，工作目录不在 PATH 时会启动失败）。
+4. **计划代码两处笔误修复**（TDD 红灯阶段暴露）：
+   - 测试里 `$$"""` 内插原始字符串中 JSON 结尾的 `}}` 与内插闭合定界符冲突（CS9007），三处改为 `$$$"""` + `{{{ }}}`；
+   - `ResultOf` 在 `using` 释放文档后返回的 `JsonElement` 不可再访问（`ObjectDisposedException`），返回前需 `Clone()`。
+5. **-32700 封包**：JSON 解析失败时 `id` 必未提取，错误封包显式用 `Error(null, ...)`（不含 id），与协议一致。
+6. 组合根顺序（任务 11 接线参考）：KnownDirs → Path → Registry → StartMenu → ExtraDirs。
 
 ---
 
