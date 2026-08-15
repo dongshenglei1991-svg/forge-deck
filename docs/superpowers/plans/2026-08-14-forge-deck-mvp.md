@@ -4101,7 +4101,13 @@ git commit -m "feat(ui): 快速启动页——指标/工具列表/扫描/手动�
 - 创建：`ui/src/ConfigPanel.tsx`、`ui/src/WorkdirControl.tsx`、`ui/src/FolderPickerModal.tsx`、`ui/src/Switch.tsx`、`ui/src/lib/env.ts`
 - 修改：`ui/src/App.tsx`（替换占位 configPanel、接启动/保存流程）
 
-- [ ] **步骤 1：env 文本解析**
+> **修正项（相对本计划初稿，源于任务 12/13 审查演进）：**
+> 1. App.tsx 里任务 13 暂以 `_workdirs`/`_profile` 命名豁免的值恢复具名使用（workdirs 传 ConfigPanel 与 FolderPickerModal、profile 传 ConfigPanel）。
+> 2. selectTool 竞态防护（任务 13 审查 Minor 3）：`latestToolIdRef` 记录最近请求的 toolId，`profiles.get` 响应经 `setProfile((cur) => ref === p.toolId ? p : cur)` 校验，快速连点时过期 profile 被丢弃。`handleSaveProfile` 的保存响应同样按 id 校验（同类竞态：保存后立即切工具）。
+> 3. ConfigPanel 草稿复位 effect 依赖 `[profile.id]`（按值依赖会在保存回写时清掉用户正在编辑的草稿），oxlint exhaustive-deps 警告以 eslint-disable 块注释豁免；workdir 单独 effect 依赖扩展为 `[profile.id, profile.workdir]`——含 id 是因为工具切换时两个 profile 的 workdir 值可能相同（如均为空），仅依赖值会保留上一工具的未保存草稿（串档）。
+> 4. 嵌入式启动后 `setActiveSessionId(sessionId)`：任务 12 的 refreshSessions 函数式校正不会覆盖列表中仍存在的 cur，新标签稳定激活。
+
+- [x] **步骤 1：env 文本解析**
 
 `ui/src/lib/env.ts`：
 
@@ -4123,7 +4129,7 @@ export function stringifyEnv(env: Record<string, string>): string {
 }
 ```
 
-- [ ] **步骤 2：Switch 与 WorkdirControl**
+- [x] **步骤 2：Switch 与 WorkdirControl**
 
 `ui/src/Switch.tsx`：
 
@@ -4187,7 +4193,7 @@ export function WorkdirControl({ value, recent, onChange, onBrowse }: {
 }
 ```
 
-- [ ] **步骤 3：FolderPickerModal**
+- [x] **步骤 3：FolderPickerModal**
 
 `ui/src/FolderPickerModal.tsx`：
 
@@ -4243,7 +4249,7 @@ export function FolderPickerModal({ open, initialValue, commonDirs, workdirs, on
 }
 ```
 
-- [ ] **步骤 4：ConfigPanel**
+- [x] **步骤 4：ConfigPanel**
 
 `ui/src/ConfigPanel.tsx`：
 
@@ -4269,15 +4275,20 @@ export function ConfigPanel({ tool, profile, workdirs, onSave, onLaunch, onBrows
   const [openMode, setOpenMode] = useState<OpenMode>(profile.openMode);
   const [savedFlash, setSavedFlash] = useState(false);
 
+  // 切换 profile（id 变化）时复位本地草稿；保存回写不换 id，草稿得以保留——其余字段为有意忽略。
+  // 按计划依赖 [profile.id]，exhaustive-deps 警告在此禁用（oxlint 兼容 eslint-disable 注释）。
+  /* eslint-disable react-hooks/exhaustive-deps */
   useEffect(() => {
     setArgs(profile.args);
     setEnvText(stringifyEnv(profile.env));
     setAutoRestore(profile.autoRestore);
     setOpenMode(profile.openMode);
   }, [profile.id]);
+  /* eslint-enable react-hooks/exhaustive-deps */
 
-  // 工作目录单独跟随：文件夹选择弹窗直接更新 App 层 profile，需要立即回显
-  useEffect(() => setWorkdir(profile.workdir), [profile.workdir]);
+  // 工作目录单独跟随：文件夹选择弹窗直接更新 App 层 profile，需要立即回显。
+  // 依赖含 profile.id：工具切换时即使两个 profile 的 workdir 值相同（如均为空）也必须复位，避免草稿串档
+  useEffect(() => setWorkdir(profile.workdir), [profile.id, profile.workdir]);
 
   const current = (): LaunchProfile => ({
     ...profile, args, workdir, env: parseEnvText(envText), autoRestore, openMode,
@@ -4348,9 +4359,9 @@ export function ConfigPanel({ tool, profile, workdirs, onSave, onLaunch, onBrows
 }
 ```
 
-- [ ] **步骤 5：App 接入配置面板与启动流程**
+- [x] **步骤 5：App 接入配置面板与启动流程**
 
-`ui/src/App.tsx`：新增 import（`ConfigPanel`、`FolderPickerModal`）、状态 `const [pickerOpen, setPickerOpen] = useState(false);`，替换任务 13 的 configPanel 占位：
+`ui/src/App.tsx`：新增 import（`ConfigPanel`、`FolderPickerModal`）与 `useRef`；任务 13 的 `_workdirs`/`_profile` 恢复具名（`workdirs`/`profile`）；新增状态 `const [pickerOpen, setPickerOpen] = useState(false);`；替换任务 13 的 configPanel 占位：
 
 ```tsx
 configPanel={selectedTool && profile ? (
@@ -4367,11 +4378,23 @@ configPanel={selectedTool && profile ? (
 )}
 ```
 
-新增处理函数：
+新增/修改处理函数（selectTool 加竞态防护，见任务头部修正项 2/4）：
 
 ```tsx
+// 竞态防护：快速连点工具时 profiles.get 响应可能乱序到达，回调式校验丢弃非最新请求的过期 profile
+const latestToolIdRef = useRef<string | null>(null);
+
+const selectTool = useCallback(async (toolId: string) => {
+  latestToolIdRef.current = toolId;
+  setSelectedToolId(toolId);
+  const p = await bridge.request<LaunchProfile>('profiles.get', { toolId });
+  setProfile((cur) => (latestToolIdRef.current === p.toolId ? p : cur));
+}, []);
+
 const handleSaveProfile = useCallback(async (p: LaunchProfile) => {
-  setProfile(await bridge.request<LaunchProfile>('profiles.save', { profile: p }));
+  const saved = await bridge.request<LaunchProfile>('profiles.save', { profile: p });
+  // 同 selectTool 的竞态防护：保存响应晚于工具切换到达时（cur 已是其他工具）丢弃，避免覆盖新选中项
+  setProfile((cur) => (cur && cur.id === saved.id ? saved : cur));
 }, []);
 
 const handleLaunch = useCallback(async (p: LaunchProfile) => {
@@ -4382,14 +4405,14 @@ const handleLaunch = useCallback(async (p: LaunchProfile) => {
     if (p.openMode === 'embedded') {
       const { sessionId } = await bridge.request<{ sessionId: string }>('terminal.create',
         { toolId: p.toolId, profileId: p.id, cols: 120, rows: 30 });
-      setActiveSessionId(sessionId);
+      setActiveSessionId(sessionId); // 显式激活新标签；refreshSessions 的函数式校正不会覆盖仍在列表中的 cur
       await refreshSessions();
     } else {
       await bridge.request('launch.external', { toolId: p.toolId, profileId: p.id });
     }
     setAppInfo(await bridge.request<AppInfo>('app.info'));
     await refreshWorkdirs();
-  } catch (e: any) { console.error('启动失败', e); } // Toast 在任务 16 接入
+  } catch (e) { console.error('启动失败', e); } // Toast 在任务 16 接入
 }, [tools, refreshSessions, refreshWorkdirs]);
 ```
 
@@ -4406,20 +4429,22 @@ const handleLaunch = useCallback(async (p: LaunchProfile) => {
 ```
 
 
-- [ ] **步骤 6：构建与联调验证**
+- [x] **步骤 6：构建与联调验证**
 
-运行：`cd ui && npm run build` → `✓ built`。
-联调验证：
-1. 选中 `Cmd 手动`（或任一已装工具），工作目录点文件夹按钮 → 弹窗列出真实常用目录；选择后回填输入框。
-2. 下拉按钮 → 最近 5 条历史。
-3. 参数填 `/k`、运行方式=内嵌终端 → 点"启动工具" → 底部新标签出现 `cmd` 交互终端（`/k` 保持存活）。
-4. 运行方式=独立窗口 → 点启动 → 弹出独立 cmd 窗口，工作目录正确。
-5. Claude Code（若已装）显示"自动恢复会话"开关；保存后重启应用配置仍在。
+1. `cd ui && npm run build` → `✓ built`；`npm run lint` → 0 警告 0 错误（ConfigPanel 的草稿复位 effect 按计划依赖 `[profile.id]`，exhaustive-deps 警告以 eslint-disable 块注释豁免）。
+2. 沿用任务 12 的替代方案：headless Edge（Chromium 151）+ CDP 驱动 vite preview（MockBridge），19 项断言全过：
+   - 选中 Codex CLI → 配置面板渲染（logo `Co`/名称/`codex.exe` 文件名）；参数、workdir、env 文本域均可编辑（env 混入注释行与无 `=` 行验证解析）；
+   - workdir 下拉 → 最近目录菜单显示 mock 3 条，点选回填输入框、菜单关闭；文件夹按钮 → FolderPickerModal 打开，常用位置 = 历史 3 + commonDirs 4 去重合并 7 条（≤12），点选联动 path 输入与 active 高亮，确认后弹窗关闭且 workdir 输入框**立即回显**（App 层 profile → ConfigPanel workdir effect 生效）；
+   - 运行方式二选一切换（内嵌终端/独立窗口）正常；Claude Code（builtin）显示"启动时自动恢复上次会话"开关且可切换，Codex 不显示，手动添加的同名 "Claude Code"（非 builtin）也不显示——RESUMABLE 集合 + builtin 条件均验证；
+   - 保存 → panel-meta 短暂"已保存"（1.4s 后复位"未保存更改"）；启动（embedded）→ mock 下新终端标签出现并激活；
+   - **竞态防护对照实验**：先给 Claude/Codex 分别保存 args `AAA`/`BBB`，快速连点两者，4ms 间隔采样 200ms 窗口——带防护时全程 `BBB`（过期 `AAA` 从未出现）、标题跟随最后点击项；临时禁用防护重跑同一采样可捕获 `AAA`（t≈89–100ms 可见过期 profile），证明测试有判别力、防护实际生效；
+   - 布局探针对照设计稿第 62-63 行：config-top（logo+名称+文件名）、三段 config-section（启动参数/环境变量/运行方式）、workdir-control 三列 grid 实测 `527px 34px 34px`、choice-row 双等宽列、config-actions（primary 启动工具 + 保存配置）、switch 34×20，面板与页面均无横向溢出。
+3. 真实 WebView2 宿主联调（真实 cmd `/k` 存活、独立窗口弹出、重启后配置持久化）受任务 12 所述环境问题所限未执行，由后端 76 个单测覆盖桥接语义，待环境修复后补人工冒烟；未选工具 fallback 面板在 mock 下不可触发（启动即自动选中 preferred），仅经代码路径确认。
 
-- [ ] **步骤 7：Commit**
+- [x] **步骤 7：Commit**
 
 ```bash
-git add ui/src
+cd /c/workspace/ForgeDeck && git add ui/src docs/superpowers/plans/2026-08-14-forge-deck-mvp.md
 git commit -m "feat(ui): 启动配置面板——参数/工作目录控件/环境变量/运行方式/启动流程"
 ```
 
