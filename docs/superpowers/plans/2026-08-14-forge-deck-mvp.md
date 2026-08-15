@@ -2185,7 +2185,7 @@ git commit -m "fix(core): ps1 外部启动宿主包装与双轨一致性"
 - 创建：`src/ForgeDeck.Core/Terminal/TerminalSessionManager.cs`
 - 测试：`tests/ForgeDeck.Core.Tests/TerminalSessionManagerTests.cs`
 
-- [ ] **步骤 1：编写失败的集成测试**
+- [x] **步骤 1：编写失败的集成测试**
 
 `tests/ForgeDeck.Core.Tests/TerminalSessionManagerTests.cs`：
 
@@ -2223,17 +2223,15 @@ public class TerminalSessionManagerTests : IDisposable
         finally { mgr.Output -= OnOutput; }
     }
 
-    private static Task<int> WaitForExitAsync(TerminalSessionManager mgr, string sessionId, TimeSpan timeout)
+    private static async Task<int> WaitForExitAsync(TerminalSessionManager mgr, string sessionId, TimeSpan timeout)
     {
         var tcs = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
         void OnExit(string id, int code) { if (id == sessionId) tcs.TrySetResult(code); }
         mgr.Exited += OnExit;
-        return Task.WhenAny(tcs.Task, Task.Delay(timeout)).ContinueWith(_ =>
-        {
-            mgr.Exited -= OnExit;
-            Assert.True(tcs.Task.IsCompleted, "超时未收到退出事件");
-            return tcs.Task.Result;
-        });
+        var winner = await Task.WhenAny(tcs.Task, Task.Delay(timeout));
+        mgr.Exited -= OnExit;
+        Assert.True(tcs.Task.IsCompleted, "超时未收到退出事件");
+        return tcs.Task.Result;
     }
 
     [Fact]
@@ -2246,6 +2244,25 @@ public class TerminalSessionManagerTests : IDisposable
         var session = Assert.Single(_mgr.List());
         Assert.False(session.Running);
         Assert.Equal(0, session.ExitCode);
+    }
+
+    [Fact]
+    public async Task Create_SpaceInArgument_SurvivesCommandLine()
+    {
+        // Porta.Pty 负责给参数数组加引号：含空格参数应完整到达子进程
+        var id = await _mgr.CreateAsync("echo2", CmdExe,
+            new[] { "/c", "echo", "forge deck spaced" }, Path.GetTempPath());
+        await WaitForOutputAsync(_mgr, id, acc => acc.Contains("forge deck spaced"), TimeSpan.FromSeconds(10));
+        await WaitForExitAsync(_mgr, id, TimeSpan.FromSeconds(10));
+    }
+
+    [Fact]
+    public async Task EnvVars_ReachChildProcess()
+    {
+        var id = await _mgr.CreateAsync("env", CmdExe, new[] { "/c", "echo %FD_TEST_A%" }, Path.GetTempPath(),
+            env: new Dictionary<string, string> { ["FD_TEST_A"] = "forge-env-ok" });
+        await WaitForOutputAsync(_mgr, id, acc => acc.Contains("forge-env-ok"), TimeSpan.FromSeconds(10));
+        await WaitForExitAsync(_mgr, id, TimeSpan.FromSeconds(10));
     }
 
     [Fact]
@@ -2270,11 +2287,12 @@ public class TerminalSessionManagerTests : IDisposable
     }
 
     [Fact]
-    public async Task Close_RemovesSessionFromList()
+    public async Task Close_RemovesSessionFromList_AndKillsProcess()
     {
         var id = await _mgr.CreateAsync("shell", CmdExe, new[] { "/k" }, Path.GetTempPath());
         await Task.Delay(600);
         _mgr.Close(id);
+        await WaitForExitAsync(_mgr, id, TimeSpan.FromSeconds(10));
         Assert.Empty(_mgr.List());
     }
 
@@ -2293,7 +2311,7 @@ public class TerminalSessionManagerTests : IDisposable
 
 运行：`dotnet test --filter TerminalSessionManagerTests` → 预期编译失败。
 
-- [ ] **步骤 2：实现会话管理器**
+- [x] **步骤 2：实现会话管理器**
 
 `src/ForgeDeck.Core/Terminal/TerminalSessionManager.cs`：
 
@@ -2308,12 +2326,14 @@ public sealed record TerminalSessionInfo(string SessionId, string Title, string 
 
 public sealed class TerminalSessionManager : IDisposable
 {
+    private static readonly TimeSpan CloseWaitTimeout = TimeSpan.FromSeconds(2);
+
     private readonly Dictionary<string, Session> _sessions = new();
     private readonly object _gate = new();
 
     /// <summary>终端输出（sessionId, chunk，UTF-8 已解码）。</summary>
     public event Action<string, string>? Output;
-    /// <summary>进程退出（sessionId, exitCode）。</summary>
+    /// <summary>进程退出（sessionId, exitCode；每个会话恰好触发一次）。</summary>
     public event Action<string, int>? Exited;
     /// <summary>会话列表或运行状态变化。</summary>
     public event Action? Changed;
@@ -2331,6 +2351,9 @@ public sealed class TerminalSessionManager : IDisposable
                 merged[key] = value;
 
         var id = Guid.NewGuid().ToString("N");
+        // Porta.Pty 非 verbatim 模式会给每个参数加引号（含 "/c"），cmd.exe 无法解析；
+        // 改用 verbatim + 仅给含空白的参数加引号（与 LaunchService.QuoteIfSpaced 约定一致），
+        // App 路径的引号始终由 Porta 负责（带空格路径已验证）。
         var connection = await PtyProvider.SpawnAsync(new PtyOptions
         {
             Name = title,
@@ -2338,34 +2361,55 @@ public sealed class TerminalSessionManager : IDisposable
             Rows = rows,
             Cwd = workdir,
             App = app,
-            CommandLine = args.ToArray(),
+            CommandLine = args.Select(QuoteIfSpaced).ToArray(),
+            VerbatimCommandLine = true,
             Environment = merged,
         }, CancellationToken.None);
 
         var session = new Session(id, title, workdir, connection);
         lock (_gate) { _sessions[id] = session; }
-        connection.ProcessExited += (_, e) =>
-        {
-            session.Running = false;
-            session.ExitCode = e.ExitCode;
-            Exited?.Invoke(id, e.ExitCode);
-            Changed?.Invoke();
-        };
+        connection.ProcessExited += (_, e) => AnnounceExit(session, e.ExitCode);
         _ = PumpOutputAsync(session);
+        // 极端竞态：进程在订阅事件前已退出（事件已丢）——主动探测补报，恰好一次语义由 AnnounceExit 保证
+        try { if (connection.WaitForExit(0)) AnnounceExit(session, SafeExitCode(session)); }
+        catch { }
         Changed?.Invoke();
         return id;
+    }
+
+    /// <summary>含空白的参数加引号，其余原样（Windows 命令行惯例）。</summary>
+    private static string QuoteIfSpaced(string token) =>
+        token.Any(char.IsWhiteSpace) ? $"\"{token}\"" : token;
+
+    /// <summary>标记退出并广播 Exited/Changed，恰好一次（Porta 事件与主动补报可能竞争）。</summary>
+    private void AnnounceExit(Session session, int exitCode)
+    {
+        if (!session.TryMarkExited(exitCode)) return;
+        Exited?.Invoke(session.Id, exitCode);
+        Changed?.Invoke();
+    }
+
+    private static int SafeExitCode(Session session)
+    {
+        try { return session.Connection.ExitCode; }
+        catch { return -1; }
     }
 
     private async Task PumpOutputAsync(Session session)
     {
         var buffer = new byte[8192];
+        var chars = new char[Encoding.UTF8.GetMaxCharCount(buffer.Length)];
+        // 有状态解码器：跨 chunk 的多字节 UTF-8 序列不会裂成 U+FFFD
+        var decoder = Encoding.UTF8.GetDecoder();
         try
         {
             while (true)
             {
                 var read = await session.Connection.ReaderStream.ReadAsync(buffer.AsMemory(0, buffer.Length));
                 if (read <= 0) break;
-                Output?.Invoke(session.Id, Encoding.UTF8.GetString(buffer, 0, read));
+                var count = decoder.GetChars(buffer, 0, read, chars, 0);
+                if (count > 0)
+                    Output?.Invoke(session.Id, new string(chars, 0, count));
             }
         }
         catch (ObjectDisposedException) { }
@@ -2390,7 +2434,10 @@ public sealed class TerminalSessionManager : IDisposable
         try { session.Connection.Kill(); } catch { }
     }
 
-    /// <summary>关闭并从列表移除会话（标签页 × 按钮）。</summary>
+    /// <summary>关闭并从列表移除会话（标签页 × 按钮）。kill/等退出/释放连接放后台执行：
+    /// ① 立即 Dispose 会拆掉 Porta 的退出监视（Process.Exited 先退订），Exited 事件永远不发；
+    /// ② 若在本方法内同步等退出，WaitForExit 会在调用线程上同步触发 Process.Exited——
+    ///    而调用方往往在 Close 返回后才订阅 Exited，同步触发必然错过。后台化让事件一定晚于 Close 返回。</summary>
     public void Close(string sessionId)
     {
         Session? session;
@@ -2399,8 +2446,21 @@ public sealed class TerminalSessionManager : IDisposable
             if (!_sessions.TryGetValue(sessionId, out session)) return;
             _sessions.Remove(sessionId);
         }
-        try { if (session.Running) session.Connection.Kill(); } catch { }
-        session.Dispose();
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                if (session.Running)
+                {
+                    session.Connection.Kill();
+                    session.Connection.WaitForExit((int)CloseWaitTimeout.TotalMilliseconds);
+                    // 事件未及送达（或 kill 失败）则补报，恰好一次
+                    if (session.Running) AnnounceExit(session, SafeExitCode(session));
+                }
+            }
+            catch { }
+            finally { session.Dispose(); }
+        });
         Changed?.Invoke();
     }
 
@@ -2441,33 +2501,66 @@ public sealed class TerminalSessionManager : IDisposable
             all = _sessions.Values.ToList();
             _sessions.Clear();
         }
-        foreach (var s in all) s.Dispose();
+        foreach (var s in all)
+        {
+            try
+            {
+                if (s.Running)
+                {
+                    s.Connection.Kill();
+                    s.Connection.WaitForExit((int)CloseWaitTimeout.TotalMilliseconds);
+                    if (s.Running) AnnounceExit(s, SafeExitCode(s));
+                }
+            }
+            catch { }
+            s.Dispose();
+        }
     }
 
     private sealed class Session(string id, string title, string workdir, IPtyConnection connection) : IDisposable
     {
+        private int _exitAnnounced;
+
         public string Id { get; } = id;
         public string Title { get; } = title;
         public string Workdir { get; } = workdir;
         public DateTime StartedAt { get; } = DateTime.UtcNow;
         public IPtyConnection Connection { get; } = connection;
-        public bool Running { get; set; } = true;
-        public int ExitCode { get; set; } = -1;
+        public bool Running { get; private set; } = true;
+        public int ExitCode { get; private set; } = -1;
+
+        /// <summary>记录退出状态；返回 false 表示已报过（防 Porta 事件与主动补报双发）。</summary>
+        public bool TryMarkExited(int exitCode)
+        {
+            if (Interlocked.Exchange(ref _exitAnnounced, 1) == 1) return false;
+            ExitCode = exitCode;
+            Running = false;
+            return true;
+        }
+
         public void Dispose() => Connection.Dispose();
     }
 }
 ```
 
-- [ ] **步骤 3：运行测试验证通过**
+- [x] **步骤 3：运行测试验证通过**
 
-运行：`dotnet test --filter TerminalSessionManagerTests` → 预期 5 Passed（约 5-10 秒，含真实 ConPTY 进程）。
+运行：`dotnet test --filter TerminalSessionManagerTests` → 预期 7 Passed（约 2-5 秒，含真实 ConPTY 进程）。
 
-- [ ] **步骤 4：Commit**
+- [x] **步骤 4：Commit**
 
 ```bash
 git add src/ForgeDeck.Core tests/ForgeDeck.Core.Tests
 git commit -m "feat(core): ConPTY 终端会话管理器（输出流/输入/resize/kill/close）"
 ```
+
+- [x] **步骤 5（实现偏差记录，Porta.Pty 1.0.7 实测）：**
+
+反编译/对照实验发现两处与 README 印象不符的实际行为，实现做了最小调整：
+
+1. **参数引号**：非 verbatim 模式 Porta 给**每个**参数加引号（`"/c" "echo hi"`），cmd.exe 无法解析（实测 `'"echo hi' 不是内部或外部命令`、退出码 1；含空格 App 路径同样失败）。修复：`VerbatimCommandLine = true` + 自行按 Windows 惯例仅给含空白参数加引号（与 `LaunchService.QuoteIfSpaced` 一致）；App 路径引号由 Porta 始终负责（带空格路径实测通过）。
+2. **Close 的 Dispose 顺序**：`PseudoConsoleConnection.Dispose()` 第一步就 `process.Exited -= handler`，Kill 后立即 Dispose 则 ProcessExited 永不触发；且 `Process.WaitForExit(ms)` 会在调用线程上**同步**触发 Process.Exited，而调用方在 `Close` 返回后才订阅 `Exited`——同步触发必然错过。修复：Close 移除会话后由后台任务执行 kill → 有界 WaitForExit(2s) → 补报（若事件未达）→ Dispose；`Session.TryMarkExited` 用 Interlocked 保证 Exited 恰好一次（Porta 事件与补报竞争安全）。
+3. 顺带加固：输出泵用有状态 UTF-8 Decoder（跨 chunk 多字节序列不裂成 U+FFFD）；CreateAsync 订阅后 `WaitForExit(0)` 探测"订阅前已退出"的竞态并补报。
 
 ---
 
