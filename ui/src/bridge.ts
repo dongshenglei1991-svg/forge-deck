@@ -156,6 +156,15 @@ class MockBridge implements Bridge {
       }
       case 'launch.external':
         return { pid: 4242 };
+      case 'window.minimize':
+      case 'window.toggleMaximize':
+      case 'window.close':
+      case 'window.beginDrag':
+        return null; // 浏览器预览无窗口控制，静默
+      case 'window.getState':
+        return { maximized: false };
+      case 'dialog.selectDirectory':
+        return { path: 'C:\\Users\\dev\\Documents\\SelectedFolder' };
       default:
         throw new Error(`未知方法：${method}`);
     }

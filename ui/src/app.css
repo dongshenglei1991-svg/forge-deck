@@ -34,3 +34,18 @@
 .term-body{padding:10px 16px}
 .term-body .xterm{height:100%}
 .term-tab .status-dot.exited{background:var(--muted);box-shadow:none}
+
+/* —— 自定义标题栏窗口控制（系统标题栏已移除） —— */
+.top{-webkit-user-select:none;user-select:none}
+.win-group{display:flex;align-items:stretch;margin-left:10px;height:100%}
+.win-btn{width:44px;height:100%;border:0;background:transparent;color:var(--muted);display:grid;place-items:center}
+.win-btn:hover{background:var(--fg-soft);color:var(--fg)}
+.win-btn.close:hover{background:var(--danger);color:#fff}
+
+/* —— 全局滚动条（匹配深色主题） —— */
+*{scrollbar-width:thin;scrollbar-color:color-mix(in oklch,var(--fg) 16%,transparent) transparent}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:color-mix(in oklch,var(--fg) 16%,transparent);border-radius:6px;border:2px solid transparent;background-clip:content-box}
+::-webkit-scrollbar-thumb:hover{background:color-mix(in oklch,var(--fg) 30%,transparent);border:2px solid transparent;background-clip:content-box}
+::-webkit-scrollbar-corner{background:transparent}

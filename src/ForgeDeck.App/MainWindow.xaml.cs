@@ -5,6 +5,7 @@ using ForgeDeck.Core.Bridge;
 using ForgeDeck.Core.Config;
 using ForgeDeck.Core.Scanning;
 using ForgeDeck.Core.Terminal;
+using Microsoft.Win32;
 using Microsoft.Web.WebView2.Core;
 
 namespace ForgeDeck.App;
@@ -32,10 +33,66 @@ public partial class MainWindow : Window
             }),
             _terminal);
         _bridge.Dispatcher.Outgoing += Post;
+        RegisterWindowMethods();
         Web.DefaultBackgroundColor = System.Drawing.Color.FromArgb(14, 18, 17);
         Web.CoreWebView2InitializationCompleted += OnWebReady;
         Loaded += OnWindowLoaded;
         Closing += OnClosing;
+    }
+
+    /// <summary>窗口操作与系统对话框属 UI 能力，在 App 层注册（Core 不依赖 WPF）。</summary>
+    private void RegisterWindowMethods()
+    {
+        var d = _bridge.Dispatcher;
+        d.Register("window.minimize", _ =>
+        {
+            WindowState = WindowState.Minimized;
+            return Task.FromResult<object?>(null);
+        });
+        d.Register("window.toggleMaximize", _ =>
+        {
+            WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
+            return Task.FromResult<object?>(null);
+        });
+        d.Register("window.close", _ =>
+        {
+            Close();
+            return Task.FromResult<object?>(null);
+        });
+        d.Register("window.beginDrag", _ =>
+        {
+            if (WindowState != WindowState.Maximized)
+            {
+                try { DragMove(); }
+                catch (InvalidOperationException) { /* 左键已在消息往返间释放，忽略 */ }
+            }
+            return Task.FromResult<object?>(null);
+        });
+        d.Register("window.getState", _ =>
+            Task.FromResult<object?>(new { maximized = WindowState == WindowState.Maximized }));
+        d.Register("dialog.selectDirectory", p =>
+        {
+            string? initial = null;
+            try { initial = p?.GetProperty("initial").GetString(); } catch (KeyNotFoundException) { }
+            string? result = null;
+            var dlg = new OpenFolderDialog { Title = "选择工作文件夹" };
+            if (!string.IsNullOrEmpty(initial) && Directory.Exists(initial))
+                dlg.InitialDirectory = initial;
+            if (dlg.ShowDialog(this) == true)
+                result = dlg.FolderName;
+            return Task.FromResult<object?>(result == null ? null : new { path = result });
+        });
+        StateChanged += (_, _) =>
+        {
+            // 最大化时 WindowChrome 会向屏幕外溢出约 7px，用内容边距补偿
+            var chrome = System.Windows.Shell.WindowChrome.GetWindowChrome(this);
+            if (chrome != null)
+                chrome.ResizeBorderThickness = WindowState == WindowState.Maximized
+                    ? new Thickness(0) : new Thickness(8);
+            Root.Margin = WindowState == WindowState.Maximized
+                ? new Thickness(7) : new Thickness(0);
+            d.Emit("window.state.changed", new { maximized = WindowState == WindowState.Maximized });
+        };
     }
 
     // 部分环境下 WPF WebView2 控件的自动初始化（内部走控件自己的环境创建路径）会无限挂起，

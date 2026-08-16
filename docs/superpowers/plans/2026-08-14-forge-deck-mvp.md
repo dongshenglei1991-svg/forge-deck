@@ -4776,3 +4776,9 @@ git commit -m "chore: 审查遗留清理——toast 定位/令牌化/可访问�
 - M5：ui/public/icons.svg 死资产可删。
 - M7：桥层薄封装方法（createShell/kill/close、tools.list、profiles.delete、workdirs.remove）无 BridgeTests 直接分发测试（Core 层有测）。
 - 真机保留项：本机 WebView2 运行时异常，WPF 宿主内真实 ConPTY 冒烟待环境修复后补做（窗口可开、桥有 76 单测覆盖）。
+
+## v0.2 调整（2026-08-16，用户提出）
+
+1. **自定义标题栏**：`WindowStyle="None"` + WindowChrome（CaptionHeight=0，保留 8px 隐形调整边框）；顶栏右侧加最小化/最大化还原/关闭三按钮；顶栏空白区拖拽（`window.beginDrag` → DragMove）与双击切换最大化；新增桥方法 `window.minimize/toggleMaximize/close/beginDrag/getState` + `window.state.changed` 事件（App 层注册）；最大化时 Root.Margin=7 补偿 WindowChrome 溢出。实现中修复了 toggleMaximize 三元表达式两分支同值的笔误（最大化按钮失效的直接原因）。
+2. **工作目录选择改系统原生对话框**：新增桥方法 `dialog.selectDirectory`（App 层 WPF `OpenFolderDialog`，支持 initial 定位）；`FolderPickerModal` 组件删除，Mock 桥返回模拟路径。
+3. **全局滚动条样式**：webkit + firefox 双轨深色主题滚动条（令牌色，hover 加亮）。

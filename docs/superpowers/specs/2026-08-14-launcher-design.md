@@ -31,7 +31,7 @@
 
 ### UI 视觉契约
 
-界面以 `docs/design/Web-Prototype/ai-tool-launcher.html` 为像素级契约：深色 oklch 令牌体系、衬线标题字 + 等宽点缀、四视图导航（快速启动/工具库/终端会话/设置）、底部内嵌终端（工具库与设置视图下自动隐藏）、两个弹窗（手动添加工具、选择工作文件夹）。工作目录选择使用**应用内文件夹选择弹窗**（历史 + 常用位置），不使用系统原生对话框。通知铃铛与头像为静态装饰。
+界面以 `docs/design/Web-Prototype/ai-tool-launcher.html` 为像素级契约：深色 oklch 令牌体系、衬线标题字 + 等宽点缀、四视图导航（快速启动/工具库/终端会话/设置）、底部内嵌终端（工具库与设置视图下自动隐藏）、一个弹窗（手动添加工具；原工作文件夹弹窗已改为系统原生对话框）。工作目录选择使用**系统原生目录选择对话框**（2026-08-16 用户决策变更，原应用内弹窗已移除）；最近目录下拉保留。通知铃铛与头像为静态装饰。
 
 ### 非目标（YAGNI）
 
@@ -147,7 +147,7 @@ Schema（version 字段供后续迁移）：
 ### 4.5 Bridge — 消息桥（ForgeDeck.App）
 
 - `WebMessageReceived` 反序列化 → 按 method 分发到 Core 服务 → 结果回传 `PostWebMessageAsJson`。
-- 工作目录选择使用应用内文件夹选择弹窗（§2 已定），不设原生对话框桥方法（实现时移除了初稿的 `dialog.selectDirectory`，与 §2 一致）。
+- `dialog.selectDirectory`（2026-08-16 恢复）：App 层用 WPF `OpenFolderDialog` 弹系统目录选择框，返回 `{path}` 或 null（取消）。
 
 ## 5. 前端（ui）
 

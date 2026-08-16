@@ -6,7 +6,6 @@ import { LauncherView } from './LauncherView';
 import { TerminalPanel } from './TerminalPanel';
 import { AddToolModal } from './AddToolModal';
 import { ConfigPanel } from './ConfigPanel';
-import { FolderPickerModal } from './FolderPickerModal';
 import { ToolsView } from './ToolsView';
 import { SessionsView } from './SessionsView';
 import { SettingsView } from './SettingsView';
@@ -27,7 +26,6 @@ export default function App() {
   const [scanning, setScanning] = useState(false);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
-  const [pickerOpen, setPickerOpen] = useState(false);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const toast = useCallback((text: string, kind: ToastItem['kind'] = 'info') => {
     const item: ToastItem = { id: Date.now() + Math.random(), text, kind };
@@ -110,6 +108,18 @@ export default function App() {
     }
   }, [toast]);
 
+  // 系统目录选择对话框（WPF OpenFolderDialog 经桥调用；浏览器 Mock 返回模拟路径）
+  const handleBrowseWorkdir = useCallback(async () => {
+    try {
+      const r = await bridge.request<{ path: string } | null>('dialog.selectDirectory', {
+        initial: profile?.workdir || '',
+      });
+      if (r?.path) setProfile((cur) => (cur ? { ...cur, workdir: r.path } : cur));
+    } catch (e) {
+      console.error('选择目录失败', e);
+    }
+  }, [profile?.workdir]);
+
   const handleSaveProfile = useCallback(async (p: LaunchProfile) => {
     try {
       const saved = await bridge.request<LaunchProfile>('profiles.save', { profile: p });
@@ -188,7 +198,7 @@ export default function App() {
             configPanel={selectedTool && profile ? (
               <ConfigPanel
                 tool={selectedTool} profile={profile} workdirs={workdirs}
-                onBrowse={() => setPickerOpen(true)}
+                onBrowse={handleBrowseWorkdir}
                 onSave={handleSaveProfile}
                 onLaunch={handleLaunch} />
             ) : (
@@ -211,13 +221,6 @@ export default function App() {
       <TerminalPanel sessions={sessions} activeId={activeSessionId}
         onActivate={setActiveSessionId} onNewSession={handleNewShell} onCloseSession={handleCloseSession} />
       <AddToolModal open={addOpen} onClose={() => setAddOpen(false)} onConfirm={handleAddTool} />
-      <FolderPickerModal
-        open={pickerOpen}
-        initialValue={profile?.workdir || ''}
-        commonDirs={settingsInfo?.commonDirs ?? []}
-        workdirs={workdirs}
-        onConfirm={(path) => { setProfile((p) => (p ? { ...p, workdir: path } : p)); setPickerOpen(false); }}
-        onClose={() => setPickerOpen(false)} />
       <Toast items={toasts} />
     </div>
   );
