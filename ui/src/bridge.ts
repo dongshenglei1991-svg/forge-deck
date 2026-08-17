@@ -62,6 +62,8 @@ class MockBridge implements Bridge {
   private readonly tools: ToolListItem[] = [
     { tool: { id: 't-claude', name: 'Claude Code', type: 'cli', exePath: 'C:\\Users\\dev\\AppData\\Roaming\\npm\\claude.cmd', source: 'npm 全局', builtin: true, manual: false }, exists: true, defaultMode: 'embedded' },
     { tool: { id: 't-codex', name: 'Codex CLI', type: 'cli', exePath: 'C:\\Users\\dev\\.local\\bin\\codex.exe', source: '用户目录', builtin: true, manual: false }, exists: true, defaultMode: 'embedded' },
+    { tool: { id: 't-grok', name: 'Grok Build', type: 'cli', exePath: 'C:\\Users\\dev\\.grok\\bin\\grok.exe', source: '用户目录', builtin: true, manual: false }, exists: true, defaultMode: 'embedded' },
+    { tool: { id: 't-opencode', name: 'OpenCode', type: 'cli', exePath: 'C:\\Users\\dev\\AppData\\Roaming\\npm\\opencode.cmd', source: 'npm 全局', builtin: true, manual: false }, exists: true, defaultMode: 'embedded' },
     { tool: { id: 't-cursor', name: 'Cursor Agent', type: 'cli', exePath: 'C:\\Program Files\\Cursor\\resources\\app\\bin\\cursor-agent.exe', source: '开始菜单', builtin: true, manual: false }, exists: true, defaultMode: 'external' },
     { tool: { id: 't-aider', name: 'Aider', type: 'cli', exePath: 'C:\\Users\\dev\\AppData\\Local\\Programs\\Python\\Scripts\\aider.exe', source: 'Python Scripts', builtin: true, manual: false }, exists: true, defaultMode: 'embedded' },
   ];

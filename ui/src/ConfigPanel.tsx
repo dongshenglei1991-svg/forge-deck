@@ -4,8 +4,11 @@ import { WorkdirControl } from './WorkdirControl';
 import { parseEnvText, stringifyEnv } from './lib/env';
 import type { LaunchProfile, OpenMode, ToolListItem } from './types';
 
-// 与后端 KnownTools.ResumeArgs 对应：目前仅 Claude Code 有 --continue
-const RESUMABLE = new Set(['Claude Code']);
+// 与后端 KnownTools.ResumeArgs 对应：有恢复参数的 CLI 显示「自动恢复会话」开关
+const RESUMABLE = new Set([
+  'Claude Code', 'Grok Build', 'OpenCode', 'GitHub Copilot CLI',
+  'Qwen Code', 'Continue CLI', 'Gemini CLI',
+]);
 
 export function ConfigPanel({ tool, profile, workdirs, onSave, onLaunch, onBrowse }: {
   tool: ToolListItem; profile: LaunchProfile; workdirs: string[];

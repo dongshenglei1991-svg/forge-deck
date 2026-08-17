@@ -1,7 +1,10 @@
 import type { ToolListItem } from './types';
 
 const LOGOS: Record<string, string> = {
-  'Claude Code': 'C/', 'Codex CLI': 'CX', 'Gemini CLI': 'G', 'Aider': 'Ai',
+  'Claude Code': 'C/', 'Codex CLI': 'CX', 'Gemini CLI': 'G', 'Grok Build': 'GB',
+  'OpenCode': 'OC', 'GitHub Copilot CLI': 'GH', 'Qwen Code': 'Qw', 'Goose': 'Go',
+  'Amp': 'Am', 'Crush': 'Cr', 'Continue CLI': 'Cn', 'Kiro CLI': 'Ki', 'iFlow CLI': 'iF',
+  'Aider': 'Ai',
   'Cursor': 'Cu', 'Cursor Agent': 'Cu', 'Windsurf': 'W', 'Trae': 'T', 'Zed': 'Z', 'VS Code': 'VS',
 };
 const logoFor = (name: string) => LOGOS[name] ?? name.slice(0, 2);

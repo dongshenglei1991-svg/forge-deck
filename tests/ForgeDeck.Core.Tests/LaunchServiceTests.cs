@@ -71,6 +71,33 @@ public class LaunchServiceTests : IDisposable
     }
 
     [Fact]
+    public void BuildCommand_GrokAutoRestore_AppendsResumeArgs()
+    {
+        var exe = Path.Combine(_dir, "grok.exe");
+        File.WriteAllText(exe, "");
+        var withRestore = _service.BuildCommand(Tool(exe), Profile(autoRestore: true));
+        Assert.Contains("--continue", withRestore.Args);
+        var alreadyHas = _service.BuildCommand(Tool(exe), Profile("--continue", autoRestore: true));
+        Assert.Single(alreadyHas.Args.Where(a => a == "--continue"));
+    }
+
+    [Theory]
+    [InlineData("opencode.cmd", "--continue")]
+    [InlineData("copilot.exe", "--continue")]
+    [InlineData("qwen.cmd", "--continue")]
+    [InlineData("cn.exe", "--resume")]
+    [InlineData("gemini.cmd", "--resume")]
+    public void BuildCommand_KnownCliAutoRestore_AppendsResumeArgs(string fileName, string resume)
+    {
+        var exe = Path.Combine(_dir, fileName);
+        File.WriteAllText(exe, "");
+        var withRestore = _service.BuildCommand(Tool(exe), Profile(autoRestore: true));
+        Assert.Contains(resume, withRestore.Args);
+        var alreadyHas = _service.BuildCommand(Tool(exe), Profile(resume, autoRestore: true));
+        Assert.Single(alreadyHas.Args.Where(a => a == resume));
+    }
+
+    [Fact]
     public void BuildCommand_UnsupportedExtension_Throws()
     {
         var py = Path.Combine(_dir, "tool.py");

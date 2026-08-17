@@ -165,6 +165,60 @@ public class ToolScannerTests : IDisposable
     }
 
     [Fact]
+    public void Catalog_IncludesGrokBuild()
+    {
+        var byExe = KnownTools.MatchByExeName("grok.exe");
+        Assert.NotNull(byExe);
+        Assert.Equal("Grok Build", byExe.Name);
+        Assert.Equal(ToolType.Cli, byExe.Type);
+        Assert.Equal("--continue", byExe.ResumeArgs);
+        Assert.Contains(byExe.ExeNames, n => string.Equals(n, "grok", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(byExe.Hints, h =>
+            h.Pattern.Contains(@"%USERPROFILE%\.grok\bin", StringComparison.OrdinalIgnoreCase));
+
+        var byName = KnownTools.MatchByName("Grok Build");
+        Assert.NotNull(byName);
+        Assert.Equal("Grok Build", byName.Name);
+    }
+
+    public static TheoryData<string, string, string?> MainstreamCliCatalog => new()
+    {
+        { "opencode.exe", "OpenCode", "--continue" },
+        { "copilot.exe", "GitHub Copilot CLI", "--continue" },
+        { "qwen.exe", "Qwen Code", "--continue" },
+        { "goose.exe", "Goose", null },
+        { "amp.exe", "Amp", null },
+        { "crush.exe", "Crush", null },
+        { "cn.exe", "Continue CLI", "--resume" },
+        { "kiro-cli.exe", "Kiro CLI", null },
+        { "iflow.exe", "iFlow CLI", null },
+    };
+
+    [Theory]
+    [MemberData(nameof(MainstreamCliCatalog))]
+    public void Catalog_IncludesMainstreamCli(string exe, string name, string? resume)
+    {
+        var byExe = KnownTools.MatchByExeName(exe);
+        Assert.NotNull(byExe);
+        Assert.Equal(name, byExe.Name);
+        Assert.Equal(ToolType.Cli, byExe.Type);
+        Assert.Equal(resume, byExe.ResumeArgs);
+        Assert.NotEmpty(byExe.Hints);
+
+        var byName = KnownTools.MatchByName(name);
+        Assert.NotNull(byName);
+        Assert.Equal(name, byName.Name);
+    }
+
+    [Fact]
+    public void Catalog_GeminiCli_SupportsResume()
+    {
+        var gemini = KnownTools.MatchByExeName("gemini.cmd");
+        Assert.NotNull(gemini);
+        Assert.Equal("--resume", gemini.ResumeArgs);
+    }
+
+    [Fact]
     public void KnownDirs_FindsToolInHintDir()
     {
         var hintDir = Path.Combine(_dir, "npm");
