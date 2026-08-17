@@ -21,9 +21,10 @@ function ignoreSessionGone(e: unknown) {
   if (!msg.startsWith('session-gone')) console.error(e);
 }
 
-export function TerminalPanel({ sessions, activeId, onActivate, onNewSession, onCloseSession }: {
+export function TerminalPanel({ sessions, activeId, visible, onActivate, onNewSession, onCloseSession }: {
   sessions: TerminalSessionInfo[];
   activeId: string | null;
+  visible: boolean;
   onActivate: (id: string) => void;
   onNewSession: () => void;
   onCloseSession: (id: string) => void;
@@ -58,7 +59,7 @@ export function TerminalPanel({ sessions, activeId, onActivate, onNewSession, on
       if (terms.current.has(id) || !containers.current.has(id)) continue;
       const container = containers.current.get(id)!;
       const term = new Terminal({
-        fontSize: 11,
+        fontSize: 13,
         cursorBlink: true,
         theme: THEME,
         fontFamily: "ui-monospace, 'Cascadia Code', Consolas, monospace",
@@ -86,10 +87,15 @@ export function TerminalPanel({ sessions, activeId, onActivate, onNewSession, on
   }, [sessions]);
 
   useEffect(() => {
+    if (!visible) return;
     const entry = activeId ? terms.current.get(activeId) : null;
-    if (entry && entry.fit)
-      requestAnimationFrame(() => { try { entry.fit.fit(); } catch { /* 忽略 */ } });
-  }, [activeId, sessions]);
+    if (!entry) return;
+    requestAnimationFrame(() => {
+      try { entry.fit.fit(); } catch { return; }
+      bridge.request('terminal.resize', { sessionId: activeId, cols: entry.term.cols, rows: entry.term.rows })
+        .catch(ignoreSessionGone);
+    });
+  }, [visible, activeId, sessions]);
 
   return (
     <section className="terminal">
@@ -106,6 +112,12 @@ export function TerminalPanel({ sessions, activeId, onActivate, onNewSession, on
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><path d="M12 5v14M5 12h14" /></svg>
         </button>
       </div>
+      {sessions.length === 0 && (
+        <div className="term-empty">
+          <p>还没有会话。从快速启动打开工具，或新建空白会话。</p>
+          <button className="btn" onClick={onNewSession}>新建空白会话</button>
+        </div>
+      )}
       {sessions.map((s) => (
         <div key={s.sessionId}
           ref={(el) => { if (el) containers.current.set(s.sessionId, el); else containers.current.delete(s.sessionId); }}

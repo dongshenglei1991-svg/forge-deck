@@ -7,7 +7,6 @@ import { TerminalPanel } from './TerminalPanel';
 import { AddToolModal } from './AddToolModal';
 import { ConfigPanel } from './ConfigPanel';
 import { ToolsView } from './ToolsView';
-import { SessionsView } from './SessionsView';
 import { SettingsView } from './SettingsView';
 import { Toast, type ToastItem } from './Toast';
 import type { AppInfo, AppSettings, LaunchProfile, SettingsInfo, TerminalSessionInfo, ToolListItem } from './types';
@@ -142,6 +141,7 @@ export default function App() {
         const { sessionId } = await bridge.request<{ sessionId: string }>('terminal.create',
           { toolId: p.toolId, profileId: p.id, cols: 120, rows: 30 });
         setActiveSessionId(sessionId); // 显式激活新标签；refreshSessions 的函数式校正不会覆盖仍在列表中的 cur
+        setView('sessions'); // 内嵌启动后进入终端主舞台
         await refreshSessions();
       } else {
         await bridge.request('launch.external', { toolId: p.toolId, profileId: p.id });
@@ -159,6 +159,7 @@ export default function App() {
     try {
       const { sessionId } = await bridge.request<{ sessionId: string }>('terminal.createShell', { cols: 120, rows: 30 });
       setActiveSessionId(sessionId);
+      setView('sessions');
       await refreshSessions();
     } catch (e: any) {
       console.error('新建会话失败', e);
@@ -181,11 +182,11 @@ export default function App() {
     }
   }, [toast]);
 
-  const termHidden = view === 'tools' || view === 'settings';
+  const termStage = view === 'sessions';
   const selectedTool = tools.find((t) => t.tool.id === selectedToolId) ?? null;
 
   return (
-    <div className={`app${termHidden ? ' term-hidden' : ''}`}>
+    <div className={`app${termStage ? ' term-stage' : ''}`}>
       <Rail view={view} onView={setView} version={appInfo ? `v${appInfo.version} · Windows` : ''} />
       <TopBar title={VIEW_TITLES[view]} userName={settingsInfo?.userName ?? ''} onRefresh={handleRescan} />
       <main className="main" id="content">
@@ -212,14 +213,13 @@ export default function App() {
           <ToolsView tools={tools} onRescan={() => { setView('launcher'); handleRescan(); }} />
         </section>
         <section className="view-panel" data-view-panel="sessions" hidden={view !== 'sessions'}>
-          <SessionsView sessions={sessions} onNewShell={handleNewShell} />
+          <TerminalPanel visible={termStage} sessions={sessions} activeId={activeSessionId}
+            onActivate={setActiveSessionId} onNewSession={handleNewShell} onCloseSession={handleCloseSession} />
         </section>
         <section className="view-panel" data-view-panel="settings" hidden={view !== 'settings'}>
           {settingsInfo && <SettingsView info={settingsInfo} onSave={handleSaveSettings} />}
         </section>
       </main>
-      <TerminalPanel sessions={sessions} activeId={activeSessionId}
-        onActivate={setActiveSessionId} onNewSession={handleNewShell} onCloseSession={handleCloseSession} />
       <AddToolModal open={addOpen} onClose={() => setAddOpen(false)} onConfirm={handleAddTool} />
       <Toast items={toasts} />
     </div>

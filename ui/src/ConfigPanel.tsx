@@ -93,7 +93,7 @@ export function ConfigPanel({ tool, profile, workdirs, onSave, onLaunch, onBrows
           <div className="section-label">运行方式</div>
           <div className="choice-row" id="launchMode">
             <button className={`choice${openMode === 'embedded' ? ' active' : ''}`} onClick={() => setOpenMode('embedded')}>
-              <strong>内嵌终端</strong><br /><span>在下方新建会话标签</span>
+              <strong>内嵌终端</strong><br /><span>启动后进入全高终端</span>
             </button>
             <button className={`choice${openMode === 'external' ? ' active' : ''}`} onClick={() => setOpenMode('external')}>
               <strong>独立窗口</strong><br /><span>在新窗口中打开</span>
