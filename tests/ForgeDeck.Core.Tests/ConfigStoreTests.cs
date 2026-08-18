@@ -77,6 +77,23 @@ public class ConfigStoreTests : IDisposable
     }
 
     [Fact]
+    public void SaveThenLoad_RoundTripsHiddenPathsLastProfileAndPinned()
+    {
+        var path = PathFor("config.json");
+        var store = new ConfigStore(path);
+        store.Config.HiddenExePaths.Add(@"C:\Tools\hidden.exe");
+        store.Config.LastProfileByTool["t1"] = "p9";
+        store.Config.Tools.Add(new ToolInfo { Id = "t1", Name = "X", ExePath = @"C:\Tools\x.exe", PathPinned = true });
+        store.Save();
+
+        var reloaded = new ConfigStore(path);
+        reloaded.Load();
+        Assert.Equal(@"C:\Tools\hidden.exe", Assert.Single(reloaded.Config.HiddenExePaths));
+        Assert.Equal("p9", reloaded.Config.LastProfileByTool["t1"]);
+        Assert.True(Assert.Single(reloaded.Config.Tools).PathPinned);
+    }
+
+    [Fact]
     public void Load_CorruptFile_BackupFails_StillReturnsDefaults()
     {
         var path = PathFor("config.json");

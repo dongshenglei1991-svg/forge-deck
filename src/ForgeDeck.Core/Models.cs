@@ -12,6 +12,7 @@ public sealed class ToolInfo
     public string Source { get; set; } = "";
     public bool Builtin { get; set; }
     public bool Manual { get; set; }
+    public bool PathPinned { get; set; }
 }
 
 public sealed class LaunchProfile
@@ -51,4 +52,6 @@ public sealed class AppConfig
     public AppSettings Settings { get; set; } = new();
     public DateTime? LastScanAt { get; set; }
     public LastUsedInfo? LastUsed { get; set; }
+    public List<string> HiddenExePaths { get; set; } = new();
+    public Dictionary<string, string> LastProfileByTool { get; set; } = new();
 }

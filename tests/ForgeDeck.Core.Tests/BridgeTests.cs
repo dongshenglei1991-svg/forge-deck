@@ -257,6 +257,191 @@ public class BridgeTests : IDisposable
     }
 
     [Fact]
+    public async Task ProfilesSave_SameTool_KeepsOtherProfiles()
+    {
+        await _bridge.Dispatcher.HandleAsync(
+            """{"id":40,"method":"profiles.save","params":{"profile":{"id":"p-a","toolId":"t-multi","name":"默认","args":"--a","env":{},"workdir":"","openMode":"embedded","autoRestore":false}}}""");
+        await _bridge.Dispatcher.HandleAsync(
+            """{"id":41,"method":"profiles.save","params":{"profile":{"id":"p-b","toolId":"t-multi","name":"公司","args":"--b","env":{},"workdir":"D:\\work","openMode":"external","autoRestore":true}}}""");
+
+        var list = ResultOf(await _bridge.Dispatcher.HandleAsync(
+            """{"id":42,"method":"profiles.list","params":{"toolId":"t-multi"}}"""));
+        Assert.Equal(2, list.GetArrayLength());
+        Assert.Equal("默认", list[0].GetProperty("name").GetString());
+        Assert.Equal("公司", list[1].GetProperty("name").GetString());
+        Assert.Equal("p-b", _store.Config.LastProfileByTool["t-multi"]);
+    }
+
+    [Fact]
+    public async Task ProfilesGet_ReturnsLastSelected()
+    {
+        await _bridge.Dispatcher.HandleAsync(
+            """{"id":43,"method":"profiles.save","params":{"profile":{"id":"p-a","toolId":"t-sel","name":"默认","args":"","env":{},"workdir":"","openMode":"embedded","autoRestore":false}}}""");
+        await _bridge.Dispatcher.HandleAsync(
+            """{"id":44,"method":"profiles.save","params":{"profile":{"id":"p-b","toolId":"t-sel","name":"个人","args":"","env":{},"workdir":"","openMode":"embedded","autoRestore":false}}}""");
+        await _bridge.Dispatcher.HandleAsync(
+            """{"id":45,"method":"profiles.select","params":{"toolId":"t-sel","profileId":"p-a"}}""");
+
+        var got = ResultOf(await _bridge.Dispatcher.HandleAsync(
+            """{"id":46,"method":"profiles.get","params":{"toolId":"t-sel"}}"""));
+        Assert.Equal("p-a", got.GetProperty("id").GetString());
+    }
+
+    [Fact]
+    public async Task ProfilesCreate_CopiesFromSource_AndSelectsNew()
+    {
+        await _bridge.Dispatcher.HandleAsync(
+            """{"id":47,"method":"profiles.save","params":{"profile":{"id":"p-src","toolId":"t-copy","name":"默认","args":"--resume","env":{"K":"V"},"workdir":"D:\\p","openMode":"external","autoRestore":true}}}""");
+        var created = ResultOf(await _bridge.Dispatcher.HandleAsync(
+            """{"id":48,"method":"profiles.create","params":{"toolId":"t-copy","fromProfileId":"p-src"}}"""));
+        Assert.Equal("副本", created.GetProperty("name").GetString());
+        Assert.Equal("--resume", created.GetProperty("args").GetString());
+        Assert.Equal("V", created.GetProperty("env").GetProperty("K").GetString());
+        Assert.NotEqual("p-src", created.GetProperty("id").GetString());
+        Assert.Equal(created.GetProperty("id").GetString(), _store.Config.LastProfileByTool["t-copy"]);
+    }
+
+    [Fact]
+    public async Task ProfilesRename_RejectsDuplicateName()
+    {
+        await _bridge.Dispatcher.HandleAsync(
+            """{"id":49,"method":"profiles.save","params":{"profile":{"id":"p1","toolId":"t-rn","name":"默认","args":"","env":{},"workdir":"","openMode":"embedded","autoRestore":false}}}""");
+        await _bridge.Dispatcher.HandleAsync(
+            """{"id":50,"method":"profiles.save","params":{"profile":{"id":"p2","toolId":"t-rn","name":"公司","args":"","env":{},"workdir":"","openMode":"embedded","autoRestore":false}}}""");
+        var resp = await _bridge.Dispatcher.HandleAsync(
+            """{"id":51,"method":"profiles.rename","params":{"id":"p2","name":"默认"}}""");
+        Assert.Equal("validation", ErrorOf(resp!)!.Value.Code);
+    }
+
+    [Fact]
+    public async Task ProfilesDelete_LastOne_RecreatesDefault()
+    {
+        await _bridge.Dispatcher.HandleAsync(
+            """{"id":52,"method":"profiles.save","params":{"profile":{"id":"p-only","toolId":"t-last","name":"旧","args":"--x","env":{},"workdir":"","openMode":"external","autoRestore":false}}}""");
+        var resp = ResultOf(await _bridge.Dispatcher.HandleAsync(
+            """{"id":53,"method":"profiles.delete","params":{"id":"p-only"}}"""));
+        Assert.Equal("默认", resp.GetProperty("name").GetString());
+        Assert.Equal("", resp.GetProperty("args").GetString());
+        Assert.Single(_store.Config.Profiles, p => p.ToolId == "t-last");
+    }
+
+    [Fact]
+    public async Task ToolsHide_FiltersList_AndRescanDoesNotBringBack()
+    {
+        var exe = Path.Combine(_dir, "scan-me.exe");
+        File.WriteAllText(exe, "");
+        _store.Config.Tools.Add(new ToolInfo { Id = "hid1", Name = "ScanMe", ExePath = exe, Manual = false });
+        _scanHits.Add(new ScanHit(exe, null, "PATH"));
+
+        var hideResp = ResultOf(await _bridge.Dispatcher.HandleAsync(
+            """{"id":54,"method":"tools.hide","params":{"toolId":"hid1"}}"""));
+        Assert.Equal(0, hideResp.GetArrayLength());
+
+        var hidden = ResultOf(await _bridge.Dispatcher.HandleAsync("""{"id":55,"method":"tools.hidden"}"""));
+        Assert.Equal(1, hidden.GetArrayLength());
+        Assert.Equal("ScanMe", hidden[0].GetProperty("name").GetString());
+
+        var rescan = ResultOf(await _bridge.Dispatcher.HandleAsync("""{"id":56,"method":"tools.rescan"}"""));
+        Assert.Equal(0, rescan.GetArrayLength());
+        Assert.Contains(_store.Config.Tools, t => t.Id == "hid1");
+    }
+
+    [Fact]
+    public async Task ToolsUnhide_ReturnsToVisibleList()
+    {
+        var exe = Path.Combine(_dir, "back.exe");
+        File.WriteAllText(exe, "");
+        _store.Config.Tools.Add(new ToolInfo { Id = "uh1", Name = "Back", ExePath = exe, Manual = false });
+        await _bridge.Dispatcher.HandleAsync("""{"id":57,"method":"tools.hide","params":{"toolId":"uh1"}}""");
+
+        var exeJson = exe.Replace("\\", "\\\\");
+        var list = ResultOf(await _bridge.Dispatcher.HandleAsync(
+            $$$"""{"id":58,"method":"tools.unhide","params":{"exePath":"{{{exeJson}}}"}}"""));
+        Assert.Equal(1, list.GetArrayLength());
+        Assert.Equal("uh1", list[0].GetProperty("tool").GetProperty("id").GetString());
+    }
+
+    [Fact]
+    public async Task ToolsHide_Manual_ReturnsValidation()
+    {
+        var exe = Path.Combine(_dir, "hand.exe");
+        File.WriteAllText(exe, "");
+        _store.Config.Tools.Add(new ToolInfo { Id = "man1", Name = "Hand", ExePath = exe, Manual = true });
+        var resp = await _bridge.Dispatcher.HandleAsync(
+            """{"id":59,"method":"tools.hide","params":{"toolId":"man1"}}""");
+        Assert.Equal("validation", ErrorOf(resp!)!.Value.Code);
+    }
+
+    [Fact]
+    public async Task ToolsDelete_Manual_RemovesProfilesAndLastUsed()
+    {
+        var exe = Path.Combine(_dir, "del-me.exe");
+        File.WriteAllText(exe, "");
+        _store.Config.Tools.Add(new ToolInfo { Id = "del1", Name = "Del", ExePath = exe, Manual = true });
+        await _bridge.Dispatcher.HandleAsync(
+            """{"id":60,"method":"profiles.save","params":{"profile":{"id":"p-del","toolId":"del1","name":"默认","args":"","env":{},"workdir":"","openMode":"embedded","autoRestore":false}}}""");
+        _store.Config.LastUsed = new LastUsedInfo { ToolId = "del1", Workdir = _dir };
+
+        var list = ResultOf(await _bridge.Dispatcher.HandleAsync(
+            """{"id":61,"method":"tools.delete","params":{"toolId":"del1"}}"""));
+        Assert.Equal(0, list.GetArrayLength());
+        Assert.DoesNotContain(_store.Config.Profiles, p => p.ToolId == "del1");
+        Assert.Null(_store.Config.LastUsed);
+    }
+
+    [Fact]
+    public async Task ToolsDelete_Scanned_ReturnsValidation()
+    {
+        var exe = Path.Combine(_dir, "scan-del.exe");
+        File.WriteAllText(exe, "");
+        _store.Config.Tools.Add(new ToolInfo { Id = "sc1", Name = "Scan", ExePath = exe, Manual = false });
+        var resp = await _bridge.Dispatcher.HandleAsync(
+            """{"id":62,"method":"tools.delete","params":{"toolId":"sc1"}}""");
+        Assert.Equal("validation", ErrorOf(resp!)!.Value.Code);
+    }
+
+    [Fact]
+    public async Task ToolsRelocate_PinsPath_RescanDoesNotOverwrite()
+    {
+        var missing = Path.Combine(_dir, "gone.exe");
+        var next = Path.Combine(_dir, "here.exe");
+        File.WriteAllText(next, "");
+        _store.Config.Tools.Add(new ToolInfo { Id = "rel1", Name = "Moved", ExePath = missing, Manual = false });
+
+        var nextJson = next.Replace("\\", "\\\\");
+        var relocated = ResultOf(await _bridge.Dispatcher.HandleAsync(
+            $$$"""{"id":63,"method":"tools.relocate","params":{"toolId":"rel1","exePath":"{{{nextJson}}}"}}"""));
+        Assert.Equal(Path.GetFullPath(next), relocated.GetProperty("tool").GetProperty("exePath").GetString());
+        Assert.True(relocated.GetProperty("tool").GetProperty("pathPinned").GetBoolean());
+
+        var other = Path.Combine(_dir, "other-scan.exe");
+        File.WriteAllText(other, "");
+        _scanHits.Add(new ScanHit(other, null, "PATH"));
+        var rescan = ResultOf(await _bridge.Dispatcher.HandleAsync("""{"id":64,"method":"tools.rescan"}"""));
+        var pinned = Enumerable.Range(0, rescan.GetArrayLength())
+            .Select(i => rescan[i].GetProperty("tool"))
+            .First(t => t.GetProperty("id").GetString() == "rel1");
+        Assert.Equal(Path.GetFullPath(next), pinned.GetProperty("exePath").GetString());
+        Assert.True(pinned.GetProperty("pathPinned").GetBoolean());
+    }
+
+    [Fact]
+    public async Task ToolsRelocate_PathTaken_ReturnsValidation()
+    {
+        var a = Path.Combine(_dir, "a.exe");
+        var b = Path.Combine(_dir, "b.exe");
+        File.WriteAllText(a, "");
+        File.WriteAllText(b, "");
+        _store.Config.Tools.Add(new ToolInfo { Id = "ta", Name = "A", ExePath = a });
+        _store.Config.Tools.Add(new ToolInfo { Id = "tb", Name = "B", ExePath = b, Manual = false });
+        var aJson = a.Replace("\\", "\\\\");
+        var resp = await _bridge.Dispatcher.HandleAsync(
+            $$$"""{"id":65,"method":"tools.relocate","params":{"toolId":"tb","exePath":"{{{aJson}}}"}}""");
+        Assert.Equal("validation", ErrorOf(resp!)!.Value.Code);
+        Assert.Equal(b, _store.Config.Tools.First(t => t.Id == "tb").ExePath);
+    }
+
+    [Fact]
     public async Task Workdirs_AddAndList()
     {
         await _bridge.Dispatcher.HandleAsync(

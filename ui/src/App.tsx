@@ -9,7 +9,7 @@ import { ConfigPanel } from './ConfigPanel';
 import { ToolsView } from './ToolsView';
 import { SettingsView } from './SettingsView';
 import { Toast, type ToastItem } from './Toast';
-import type { AppInfo, AppSettings, LaunchProfile, SettingsInfo, TerminalSessionInfo, ToolListItem } from './types';
+import type { AppInfo, AppSettings, HiddenTool, LaunchProfile, SettingsInfo, TerminalSessionInfo, ToolListItem } from './types';
 
 const VIEW_TITLES: Record<View, string> = { launcher: '快速启动', tools: '工具库', sessions: '终端会话', settings: '设置' };
 
@@ -22,6 +22,9 @@ export default function App() {
   const [workdirs, setWorkdirs] = useState<string[]>([]);
   const [selectedToolId, setSelectedToolId] = useState<string | null>(null);
   const [profile, setProfile] = useState<LaunchProfile | null>(null);
+  const [profiles, setProfiles] = useState<LaunchProfile[]>([]);
+  const [hidden, setHidden] = useState<HiddenTool[]>([]);
+  const [renameError, setRenameError] = useState<string | null>(null);
   const [scanning, setScanning] = useState(false);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
@@ -41,6 +44,9 @@ export default function App() {
   const refreshWorkdirs = useCallback(async () => {
     setWorkdirs(await bridge.request<string[]>('workdirs.list'));
   }, []);
+  const refreshHidden = useCallback(async () => {
+    setHidden(await bridge.request<HiddenTool[]>('tools.hidden'));
+  }, []);
 
   // 竞态防护：快速连点工具时 profiles.get 响应可能乱序到达，回调式校验丢弃非最新请求的过期 profile
   const latestToolIdRef = useRef<string | null>(null);
@@ -48,8 +54,14 @@ export default function App() {
   const selectTool = useCallback(async (toolId: string) => {
     latestToolIdRef.current = toolId;
     setSelectedToolId(toolId);
-    const p = await bridge.request<LaunchProfile>('profiles.get', { toolId });
-    setProfile((cur) => (latestToolIdRef.current === p.toolId ? p : cur));
+    setRenameError(null);
+    const [p, list] = await Promise.all([
+      bridge.request<LaunchProfile>('profiles.get', { toolId }),
+      bridge.request<LaunchProfile[]>('profiles.list', { toolId }),
+    ]);
+    if (latestToolIdRef.current !== p.toolId) return;
+    setProfile(p);
+    setProfiles(list);
   }, []);
 
   // 启动主线（合并任务 12 的会话初始拉取与订阅，避免重复请求）：appInfo/settings → 按设置决定 rescan 或 list → 会话/工作目录 → 选中 preferred 工具
@@ -77,23 +89,36 @@ export default function App() {
       setTools(list);
       await refreshSessions();
       await refreshWorkdirs();
+      await refreshHidden();
       const preferred = list.find((t) => t.tool.id === info.lastUsed?.toolId) ?? list[0];
       if (preferred) await selectTool(preferred.tool.id);
     })().catch((e: any) => { console.error('启动加载失败', e); toast(e.message, 'error'); });
     const off = bridge.on('sessions.changed', () => { refreshSessions(); });
     return () => { disposed = true; off(); };
-  }, [refreshSessions, refreshWorkdirs, selectTool, toast]);
+  }, [refreshSessions, refreshWorkdirs, refreshHidden, selectTool, toast]);
+
+  const applyTools = useCallback(async (list: ToolListItem[]) => {
+    setTools(list);
+    await refreshHidden();
+    setSelectedToolId((cur) => {
+      if (cur && list.some((t) => t.tool.id === cur)) return cur;
+      const next = list[0]?.tool.id ?? null;
+      if (next) void selectTool(next);
+      else { setProfile(null); setProfiles([]); }
+      return next;
+    });
+  }, [refreshHidden, selectTool]);
 
   const handleRescan = useCallback(async () => {
     setScanning(true);
     try {
-      setTools(await bridge.request<ToolListItem[]>('tools.rescan'));
+      await applyTools(await bridge.request<ToolListItem[]>('tools.rescan'));
       setAppInfo(await bridge.request<AppInfo>('app.info'));
     } catch (e: any) {
       console.error('重新扫描失败', e);
       toast(e.message, 'error');
     } finally { setScanning(false); }
-  }, [toast]);
+  }, [toast, applyTools]);
 
   const handleAddTool = useCallback(async (name: string, exePath: string) => {
     try {
@@ -119,18 +144,116 @@ export default function App() {
     }
   }, [profile?.workdir]);
 
+  const persistProfile = useCallback(async (p: LaunchProfile) => {
+    const saved = await bridge.request<LaunchProfile>('profiles.save', { profile: p });
+    setProfile((cur) => (cur && cur.id === saved.id ? saved : cur));
+    return saved;
+  }, []);
+
   const handleSaveProfile = useCallback(async (p: LaunchProfile) => {
     try {
-      const saved = await bridge.request<LaunchProfile>('profiles.save', { profile: p });
-      // 同 selectTool 的竞态防护：保存响应晚于工具切换到达时（cur 已是其他工具）丢弃，避免覆盖新选中项
-      setProfile((cur) => (cur && cur.id === saved.id ? saved : cur));
+      await persistProfile(p);
       toast('已保存');
     } catch (e: any) {
       console.error('保存配置失败', e);
       toast(e.message, 'error');
       throw e; // rethrow 让 ConfigPanel 的 catch 兜住——失败时不闪"已保存"
     }
+  }, [persistProfile, toast]);
+
+  const handleSwitchProfile = useCallback(async (draft: LaunchProfile, nextId: string) => {
+    if (draft.id === nextId) return;
+    try {
+      await persistProfile(draft);
+      const next = await bridge.request<LaunchProfile>('profiles.select', { toolId: draft.toolId, profileId: nextId });
+      setProfile(next);
+      setProfiles(await bridge.request<LaunchProfile[]>('profiles.list', { toolId: draft.toolId }));
+      setRenameError(null);
+    } catch (e: any) {
+      toast(e.message, 'error');
+    }
+  }, [persistProfile, toast]);
+
+  const handleCreateProfile = useCallback(async (draft: LaunchProfile) => {
+    try {
+      await persistProfile(draft);
+      const created = await bridge.request<LaunchProfile>('profiles.create', { toolId: draft.toolId, fromProfileId: draft.id });
+      setProfile(created);
+      setProfiles(await bridge.request<LaunchProfile[]>('profiles.list', { toolId: draft.toolId }));
+      setRenameError(null);
+      toast('已新建配置');
+    } catch (e: any) {
+      toast(e.message, 'error');
+    }
+  }, [persistProfile, toast]);
+
+  const handleRenameProfile = useCallback(async (id: string, name: string) => {
+    try {
+      const renamed = await bridge.request<LaunchProfile>('profiles.rename', { id, name });
+      setProfiles(await bridge.request<LaunchProfile[]>('profiles.list', { toolId: renamed.toolId }));
+      setProfile((cur) => (cur && cur.id === renamed.id ? { ...cur, name: renamed.name } : cur));
+      setRenameError(null);
+      return true;
+    } catch (e: any) {
+      setRenameError(e.message);
+      return false;
+    }
+  }, []);
+
+  const handleDeleteProfile = useCallback(async (id: string) => {
+    try {
+      const next = await bridge.request<LaunchProfile>('profiles.delete', { id });
+      setProfile(next);
+      setProfiles(await bridge.request<LaunchProfile[]>('profiles.list', { toolId: next.toolId }));
+      setRenameError(null);
+      toast('已删除配置');
+    } catch (e: any) {
+      toast(e.message, 'error');
+    }
   }, [toast]);
+
+  const handleHideTool = useCallback(async (toolId: string) => {
+    try {
+      await applyTools(await bridge.request<ToolListItem[]>('tools.hide', { toolId }));
+      toast('已隐藏');
+    } catch (e: any) {
+      toast(e.message, 'error');
+    }
+  }, [applyTools, toast]);
+
+  const handleUnhideTool = useCallback(async (exePath: string) => {
+    try {
+      await applyTools(await bridge.request<ToolListItem[]>('tools.unhide', { exePath }));
+      toast('已取消隐藏');
+    } catch (e: any) {
+      toast(e.message, 'error');
+    }
+  }, [applyTools, toast]);
+
+  const handleDeleteTool = useCallback(async (toolId: string) => {
+    if (!confirm('删除该工具及其全部启动配置？此操作不可撤销。')) return;
+    try {
+      await applyTools(await bridge.request<ToolListItem[]>('tools.delete', { toolId }));
+      toast('已删除');
+    } catch (e: any) {
+      toast(e.message, 'error');
+    }
+  }, [applyTools, toast]);
+
+  const handleRelocateTool = useCallback(async (toolId: string) => {
+    try {
+      const current = tools.find((t) => t.tool.id === toolId);
+      const r = await bridge.request<{ path: string } | null>('dialog.selectFile', {
+        initial: current?.tool.exePath || '',
+      });
+      if (!r?.path) return;
+      await bridge.request('tools.relocate', { toolId, exePath: r.path });
+      setTools(await bridge.request<ToolListItem[]>('tools.list'));
+      toast('已更新可执行路径');
+    } catch (e: any) {
+      toast(e.message, 'error');
+    }
+  }, [tools, toast]);
 
   const handleLaunch = useCallback(async (p: LaunchProfile) => {
     const tool = tools.find((t) => t.tool.id === p.toolId);
@@ -198,10 +321,15 @@ export default function App() {
             onAddTool={() => setAddOpen(true)}
             configPanel={selectedTool && profile ? (
               <ConfigPanel
-                tool={selectedTool} profile={profile} workdirs={workdirs}
+                tool={selectedTool} profile={profile} profiles={profiles} workdirs={workdirs}
                 onBrowse={handleBrowseWorkdir}
                 onSave={handleSaveProfile}
-                onLaunch={handleLaunch} />
+                onLaunch={handleLaunch}
+                onSwitchProfile={handleSwitchProfile}
+                onCreateProfile={handleCreateProfile}
+                onRenameProfile={handleRenameProfile}
+                onDeleteProfile={handleDeleteProfile}
+                renameError={renameError} />
             ) : (
               <section className="panel">
                 <div className="panel-head"><span className="panel-title">启动配置</span></div>
@@ -210,7 +338,10 @@ export default function App() {
             )} />
         </section>
         <section className="view-panel" data-view-panel="tools" hidden={view !== 'tools'}>
-          <ToolsView tools={tools} onRescan={() => { setView('launcher'); handleRescan(); }} />
+          <ToolsView tools={tools} hidden={hidden}
+            onRescan={() => { setView('launcher'); handleRescan(); }}
+            onHide={handleHideTool} onDelete={handleDeleteTool}
+            onRelocate={handleRelocateTool} onUnhide={handleUnhideTool} />
         </section>
         <section className="view-panel" data-view-panel="sessions" hidden={view !== 'sessions'}>
           <TerminalPanel visible={termStage} sessions={sessions} activeId={activeSessionId}

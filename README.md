@@ -11,7 +11,8 @@
 ## 功能现状（MVP）
 
 - **扫描发现**：开始菜单 / 注册表 / PATH / 常见安装位置识别内置工具（Claude Code、Codex CLI、Grok Build、OpenCode、Copilot CLI 等），支持附加扫描目录与手动添加。
-- **启动配置**：每个工具独立的参数、环境变量（每行 `KEY=VALUE`）、工作目录与运行方式，保存即持久化。
+- **启动配置**：每个工具可有多套配置（下拉切换 / 复制新建 / 重命名 / 删除），各自保存参数、环境变量（每行 `KEY=VALUE`）、工作目录与运行方式。
+- **工具管理**：列表搜索；手加工具可删除；自动识别的可隐藏（重扫不会加回同一路径）；文件缺失时可重新定位可执行文件。
 - **两种启动方式**：内嵌终端（新会话标签）与独立窗口（外部进程）。
 - **内嵌终端**：xterm.js + ConPTY，多会话标签、输入输出、随窗口自适应尺寸。
 - **工作目录历史**：记录最近使用的工作目录，配置面板下拉与文件夹选择弹窗共用。
@@ -58,3 +59,4 @@ dotnet publish src/ForgeDeck.App -c Release -o publish
 ## 文档
 
 - [设计文档](docs/superpowers/specs/2026-08-14-launcher-design.md)
+- [多 Profile 与工具管理](docs/superpowers/specs/2026-08-18-profiles-and-tool-management-design.md)

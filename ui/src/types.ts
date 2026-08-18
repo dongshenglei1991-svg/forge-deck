@@ -9,6 +9,7 @@ export interface ToolInfo {
   source: string;
   builtin: boolean;
   manual: boolean;
+  pathPinned: boolean;
 }
 
 export interface ToolListItem {
@@ -51,6 +52,13 @@ export interface TerminalSessionInfo {
   workdir: string;
   running: boolean;
   exitCode: number | null;
+}
+
+export interface HiddenTool {
+  exePath: string;
+  name: string;
+  source: string;
+  toolId: string | null;
 }
 
 export interface AppInfo {

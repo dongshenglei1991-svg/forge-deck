@@ -81,6 +81,30 @@ public partial class MainWindow : Window
                 result = dlg.FolderName;
             return Task.FromResult<object?>(result == null ? null : new { path = result });
         });
+        d.Register("dialog.selectFile", p =>
+        {
+            string? initial = null;
+            try { initial = p?.GetProperty("initial").GetString(); } catch (KeyNotFoundException) { }
+            var dlg = new OpenFileDialog
+            {
+                Title = "选择可执行文件",
+                Filter = "可执行文件|*.exe;*.cmd;*.bat;*.ps1|所有文件|*.*",
+            };
+            if (!string.IsNullOrEmpty(initial))
+            {
+                if (File.Exists(initial))
+                {
+                    dlg.InitialDirectory = Path.GetDirectoryName(initial);
+                    dlg.FileName = Path.GetFileName(initial);
+                }
+                else if (Directory.Exists(initial))
+                    dlg.InitialDirectory = initial;
+            }
+            string? result = null;
+            if (dlg.ShowDialog(this) == true)
+                result = dlg.FileName;
+            return Task.FromResult<object?>(result == null ? null : new { path = result });
+        });
         StateChanged += (_, _) =>
         {
             // 最大化时关掉调整边框，避免 WindowChrome 再往工作区外扩一圈

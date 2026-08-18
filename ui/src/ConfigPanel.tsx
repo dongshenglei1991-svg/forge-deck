@@ -10,10 +10,16 @@ const RESUMABLE = new Set([
   'Qwen Code', 'Continue CLI', 'Gemini CLI',
 ]);
 
-export function ConfigPanel({ tool, profile, workdirs, onSave, onLaunch, onBrowse }: {
-  tool: ToolListItem; profile: LaunchProfile; workdirs: string[];
+export function ConfigPanel({ tool, profile, profiles, workdirs, onSave, onLaunch, onBrowse,
+  onSwitchProfile, onCreateProfile, onRenameProfile, onDeleteProfile, renameError }: {
+  tool: ToolListItem; profile: LaunchProfile; profiles: LaunchProfile[]; workdirs: string[];
   onSave: (p: LaunchProfile) => void | Promise<void>; onLaunch: (p: LaunchProfile) => void;
   onBrowse: () => void;
+  onSwitchProfile: (draft: LaunchProfile, nextId: string) => void | Promise<void>;
+  onCreateProfile: (draft: LaunchProfile) => void | Promise<void>;
+  onRenameProfile: (id: string, name: string) => boolean | Promise<boolean>;
+  onDeleteProfile: (id: string) => void | Promise<void>;
+  renameError: string | null;
 }) {
   const [args, setArgs] = useState(profile.args);
   const [workdir, setWorkdir] = useState(profile.workdir);
@@ -21,6 +27,8 @@ export function ConfigPanel({ tool, profile, workdirs, onSave, onLaunch, onBrows
   const [autoRestore, setAutoRestore] = useState(profile.autoRestore);
   const [openMode, setOpenMode] = useState<OpenMode>(profile.openMode);
   const [savedFlash, setSavedFlash] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [renameDraft, setRenameDraft] = useState(profile.name);
 
   // 切换 profile（id 变化）时复位本地草稿；保存回写不换 id，草稿得以保留——其余字段为有意忽略。
   // 按计划依赖 [profile.id]，exhaustive-deps 警告在此禁用（oxlint 兼容 eslint-disable 注释）。
@@ -30,6 +38,8 @@ export function ConfigPanel({ tool, profile, workdirs, onSave, onLaunch, onBrows
     setEnvText(stringifyEnv(profile.env));
     setAutoRestore(profile.autoRestore);
     setOpenMode(profile.openMode);
+    setRenaming(false);
+    setRenameDraft(profile.name);
   }, [profile.id]);
   /* eslint-enable react-hooks/exhaustive-deps */
 
@@ -40,6 +50,9 @@ export function ConfigPanel({ tool, profile, workdirs, onSave, onLaunch, onBrows
   const current = (): LaunchProfile => ({
     ...profile, args, workdir, env: parseEnvText(envText), autoRestore, openMode,
   });
+  const commitRename = async () => {
+    if (await onRenameProfile(profile.id, renameDraft)) setRenaming(false);
+  };
   // 连续保存的 flash 令牌：只有最新一次保存的定时器可以熄灭提示，避免早先的 setTimeout 提前关掉后一次的"已保存"
   const flashSeq = useRef(0);
   const save = async () => {
@@ -59,6 +72,31 @@ export function ConfigPanel({ tool, profile, workdirs, onSave, onLaunch, onBrows
         <span className="panel-title">启动配置</span>
         <span className="panel-meta">{savedFlash ? '已保存' : '未保存更改'}</span>
       </div>
+      <div className="profile-bar">
+        {renaming ? (
+          <input className="input" value={renameDraft} autoFocus
+            aria-label="配置名称"
+            onChange={(e) => setRenameDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') void commitRename();
+              if (e.key === 'Escape') setRenaming(false);
+            }} />
+        ) : (
+          <select className="input" aria-label="启动配置" value={profile.id}
+            onChange={(e) => { void onSwitchProfile(current(), e.target.value); }}>
+            {profiles.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+        )}
+        {renaming ? (
+          <button className="btn small" type="button" onClick={() => void commitRename()}>确定</button>
+        ) : (
+          <button className="btn small" type="button" title="重命名" onClick={() => { setRenameDraft(profile.name); setRenaming(true); }}>重命名</button>
+        )}
+        <button className="btn small" type="button" title="复制当前配置" onClick={() => void onCreateProfile(current())}>新建</button>
+        <button className="btn small" type="button" title="删除此配置"
+          onClick={() => { if (confirm('删除此启动配置？')) void onDeleteProfile(profile.id); }}>删除</button>
+      </div>
+      {renameError && <p className="field-error">{renameError}</p>}
       <div className="config">
         <div className="config-top">
           <div className="tool-logo">{tool.tool.name.slice(0, 2)}</div>
