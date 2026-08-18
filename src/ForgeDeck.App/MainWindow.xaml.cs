@@ -161,21 +161,22 @@ public partial class MainWindow : Window
 
     private void Post(string message)
     {
-        var core = Web.CoreWebView2;
-        if (core == null) return;
-        if (Dispatcher.CheckAccess())
+        // WebView2 必须在 UI 线程摸；终端退出事件来自线程池，先切线程再读属性
+        if (Dispatcher.HasShutdownStarted) return;
+        if (!Dispatcher.CheckAccess())
         {
-            try { core.PostWebMessageAsJson(message); }
-            catch (ObjectDisposedException) { }
+            try { Dispatcher.BeginInvoke(() => Post(message)); }
+            catch (InvalidOperationException) { }
+            return;
         }
-        else
+        try
         {
-            Dispatcher.BeginInvoke(() =>
-            {
-                try { core.PostWebMessageAsJson(message); }
-                catch (ObjectDisposedException) { }
-            });
+            var core = Web.CoreWebView2;
+            if (core == null) return;
+            core.PostWebMessageAsJson(message);
         }
+        catch (ObjectDisposedException) { }
+        catch (InvalidOperationException) { } // 关窗期 / 控件未就绪
     }
 
     /// <summary>鼠标按下发生在 WebView2 子窗口内，WPF 输入系统看不到（Mouse.LeftButton 始终为 Released），
@@ -274,15 +275,17 @@ public partial class MainWindow : Window
             _terminal.Dispose();
             return;
         }
-        e.Cancel = true;
         var running = _terminal.List().Count(s => s.Running);
         var choice = MessageBox.Show(
             $"有 {running} 个会话正在运行，退出将结束它们。确定退出吗？", "ForgeDeck",
             MessageBoxButton.YesNo, MessageBoxImage.Warning);
-        if (choice == MessageBoxResult.Yes)
+        if (choice != MessageBoxResult.Yes)
         {
-            _confirmedExit = true;
-            Close();
+            e.Cancel = true;
+            return;
         }
+        // 已在 Closing 里：只能放行当前关闭，禁止再调 Close()（会抛 InvalidOperationException）
+        _confirmedExit = true;
+        _terminal.Dispose();
     }
 }

@@ -68,8 +68,9 @@ public sealed class TerminalSessionManager : IDisposable
     private void AnnounceExit(Session session, int exitCode)
     {
         if (!session.TryMarkExited(exitCode)) return;
-        Exited?.Invoke(session.Id, exitCode);
-        Changed?.Invoke();
+        // 订阅者异常不得冒到 Process.Exited 线程池，否则会变成 AppDomain 未处理异常
+        try { Exited?.Invoke(session.Id, exitCode); } catch { }
+        try { Changed?.Invoke(); } catch { }
     }
 
     private static int SafeExitCode(Session session)

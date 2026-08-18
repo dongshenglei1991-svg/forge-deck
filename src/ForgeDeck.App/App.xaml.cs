@@ -35,12 +35,17 @@ public partial class App : Application
             _lastPromptKey = key;
             _lastPromptUtc = DateTime.UtcNow;
         }
+        if (Current?.Dispatcher.HasShutdownStarted == true) return;
         var head = fatal
             ? "发生未处理的异常，程序即将退出。"
             : "发生未处理的异常，已拦截以避免闪退，可继续使用。";
-        MessageBox.Show(
-            $"{head}\n\n{ex.GetType().Name}: {ex.Message}\n\n详细信息已记录到：\n{CrashLog}",
-            "ForgeDeck", MessageBoxButton.OK, MessageBoxImage.Error);
+        try
+        {
+            MessageBox.Show(
+                $"{head}\n\n{ex.GetType().Name}: {ex.Message}\n\n详细信息已记录到：\n{CrashLog}",
+                "ForgeDeck", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        catch (InvalidOperationException) { } // 关窗期间不能再弹窗
     }
 
     protected override void OnStartup(StartupEventArgs e)
