@@ -40,9 +40,19 @@ FORGEDECK_DEV=1 dotnet run --project src/ForgeDeck.App
 
 ## 发布
 
+仓库根目录双击 `pack.cmd`，或在 PowerShell 中执行：
+
+```powershell
+.\pack.ps1
+```
+
+脚本会按顺序构建前端并 `dotnet publish`，产物在 `publish\`（框架依赖，本机需已安装 .NET 8 桌面运行时）。
+
+手动两步等价于：
+
 ```bash
 cd ui && npm run build
-dotnet publish src/ForgeDeck.App -c Release
+dotnet publish src/ForgeDeck.App -c Release -o publish
 ```
 
 ## 文档
