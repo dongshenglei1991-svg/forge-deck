@@ -1,6 +1,8 @@
 using System.ComponentModel;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Windows;
+using System.Windows.Interop;
 using ForgeDeck.Core.Bridge;
 using ForgeDeck.Core.Config;
 using ForgeDeck.Core.Scanning;
@@ -61,11 +63,7 @@ public partial class MainWindow : Window
         });
         d.Register("window.beginDrag", _ =>
         {
-            if (WindowState != WindowState.Maximized)
-            {
-                try { DragMove(); }
-                catch (InvalidOperationException) { /* 左键已在消息往返间释放，忽略 */ }
-            }
+            BeginDrag();
             return Task.FromResult<object?>(null);
         });
         d.Register("window.getState", _ =>
@@ -161,6 +159,34 @@ public partial class MainWindow : Window
                 catch (ObjectDisposedException) { }
             });
         }
+    }
+
+    /// <summary>鼠标按下发生在 WebView2 子窗口内，WPF 输入系统看不到（Mouse.LeftButton 始终为 Released），
+    /// Window.DragMove() 因此必抛 InvalidOperationException。改用真实按键状态判定，
+    /// 以 HTCAPTION 非客户区消息进入系统原生移动循环。</summary>
+    private void BeginDrag()
+    {
+        if (WindowState == WindowState.Maximized) return;
+        if ((Win32.GetAsyncKeyState(Win32.VK_LBUTTON) & 0x8000) == 0) return; // 往返期间左键已松开
+        var hwnd = new WindowInteropHelper(this).Handle;
+        Win32.ReleaseCapture();
+        Win32.SendMessage(hwnd, Win32.WM_NCLBUTTONDOWN, (IntPtr)Win32.HTCAPTION, IntPtr.Zero);
+    }
+
+    private static class Win32
+    {
+        internal const int VK_LBUTTON = 0x01;
+        internal const int WM_NCLBUTTONDOWN = 0x00A1;
+        internal const int HTCAPTION = 0x2;
+
+        [DllImport("user32.dll")]
+        internal static extern short GetAsyncKeyState(int vKey);
+
+        [DllImport("user32.dll")]
+        internal static extern bool ReleaseCapture();
+
+        [DllImport("user32.dll")]
+        internal static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
     }
 
     private void OnClosing(object? sender, CancelEventArgs e)
