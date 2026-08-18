@@ -2,8 +2,9 @@
       --bg: oklch(18% 0.025 170); --surface: oklch(22% 0.028 170); --fg: oklch(94% 0.018 170);
       --muted: oklch(68% 0.025 170); --border: oklch(32% 0.03 170); --accent: oklch(78% 0.15 155);
       --accent-soft: color-mix(in oklch, var(--accent) 14%, transparent); --fg-soft: color-mix(in oklch, var(--fg) 6%, transparent); --danger: #e5484d;
-      --font-display: 'Iowan Old Style', 'Charter', Georgia, 'Times New Roman', serif;
-      --font-body: 'Segoe UI', system-ui, sans-serif; --font-mono: ui-monospace, 'Cascadia Code', Consolas, monospace;
+      --font-display: 'Iowan Old Style', 'Charter', Georgia, 'Times New Roman', 'Microsoft YaHei UI', 'Microsoft YaHei', '微软雅黑', sans-serif;
+      --font-body: 'Segoe UI', system-ui, 'Microsoft YaHei UI', 'Microsoft YaHei', '微软雅黑', sans-serif;
+      --font-mono: ui-monospace, 'Cascadia Mono', 'Cascadia Code', Consolas, 'Microsoft YaHei UI', 'Microsoft YaHei', '微软雅黑', monospace;
       --radius: 8px; --rail: 224px;
     }
     *,*::before,*::after{box-sizing:border-box} html,body{height:100%;overflow:hidden} body{margin:0;background:var(--bg);color:var(--fg);font:13px/1.5 var(--font-body);-webkit-font-smoothing:antialiased} button,input,textarea{font:inherit} button{cursor:pointer} svg{display:block} .mono{font-family:var(--font-mono)}

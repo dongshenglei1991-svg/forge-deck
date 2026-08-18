@@ -62,7 +62,10 @@ export function TerminalPanel({ sessions, activeId, visible, onActivate, onNewSe
         fontSize: 13,
         cursorBlink: true,
         theme: THEME,
-        fontFamily: "ui-monospace, 'Cascadia Code', Consolas, monospace",
+        // 与 --font-mono 同步：西文走 Cascadia/Consolas，缺字形时回退微软雅黑，避免 monospace→新宋体
+        fontFamily: getComputedStyle(document.documentElement)
+          .getPropertyValue('--font-mono').trim()
+          || "ui-monospace, 'Cascadia Mono', 'Cascadia Code', Consolas, 'Microsoft YaHei UI', '微软雅黑', monospace",
       });
       const fit = new FitAddon();
       term.loadAddon(fit);
