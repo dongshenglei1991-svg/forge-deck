@@ -3,6 +3,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Interop;
+using ForgeDeck.Core;
 using ForgeDeck.Core.Bridge;
 using ForgeDeck.Core.Config;
 using ForgeDeck.Core.Scanning;
@@ -82,15 +83,31 @@ public partial class MainWindow : Window
         });
         StateChanged += (_, _) =>
         {
-            // 最大化时 WindowChrome 会向屏幕外溢出约 7px，用内容边距补偿
+            // 最大化时关掉调整边框，避免 WindowChrome 再往工作区外扩一圈
             var chrome = System.Windows.Shell.WindowChrome.GetWindowChrome(this);
             if (chrome != null)
                 chrome.ResizeBorderThickness = WindowState == WindowState.Maximized
                     ? new Thickness(0) : new Thickness(8);
-            Root.Margin = WindowState == WindowState.Maximized
-                ? new Thickness(7) : new Thickness(0);
             d.Emit("window.state.changed", new { maximized = WindowState == WindowState.Maximized });
         };
+    }
+
+    protected override void OnSourceInitialized(EventArgs e)
+    {
+        base.OnSourceInitialized(e);
+        if (PresentationSource.FromVisual(this) is HwndSource source)
+            source.AddHook(WndProc);
+    }
+
+    /// <summary>无边框窗口默认最大化到整块屏幕（含任务栏）。按显示器工作区回写
+    /// WM_GETMINMAXINFO，底部/侧边任务栏都不再压住内容。</summary>
+    private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if (msg == Win32.WM_GETMINMAXINFO)
+        {
+            handled = Win32.TryApplyWorkArea(hwnd, lParam);
+        }
+        return IntPtr.Zero;
     }
 
     // 部分环境下 WPF WebView2 控件的自动初始化（内部走控件自己的环境创建路径）会无限挂起，
@@ -177,7 +194,9 @@ public partial class MainWindow : Window
     {
         internal const int VK_LBUTTON = 0x01;
         internal const int WM_NCLBUTTONDOWN = 0x00A1;
+        internal const int WM_GETMINMAXINFO = 0x0024;
         internal const int HTCAPTION = 0x2;
+        private const uint MonitorDefaultToNearest = 2;
 
         [DllImport("user32.dll")]
         internal static extern short GetAsyncKeyState(int vKey);
@@ -187,6 +206,65 @@ public partial class MainWindow : Window
 
         [DllImport("user32.dll")]
         internal static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto)]
+        private static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfo info);
+
+        internal static bool TryApplyWorkArea(IntPtr hwnd, IntPtr lParam)
+        {
+            var monitor = MonitorFromWindow(hwnd, MonitorDefaultToNearest);
+            if (monitor == IntPtr.Zero) return false;
+
+            var info = new MonitorInfo { Size = Marshal.SizeOf<MonitorInfo>() };
+            if (!GetMonitorInfo(monitor, ref info)) return false;
+
+            var mmi = Marshal.PtrToStructure<MinMaxInfo>(lParam);
+            var place = MaximizeWorkArea.FromMonitor(
+                info.Work.Left, info.Work.Top, info.Work.Right, info.Work.Bottom,
+                info.Monitor.Left, info.Monitor.Top);
+            mmi.MaxPosition = new Point { X = place.X, Y = place.Y };
+            mmi.MaxSize = new Point { X = place.Width, Y = place.Height };
+            Marshal.StructureToPtr(mmi, lParam, fDeleteOld: true);
+            return true;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct Point
+        {
+            public int X;
+            public int Y;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct Rect
+        {
+            public int Left;
+            public int Top;
+            public int Right;
+            public int Bottom;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct MinMaxInfo
+        {
+            public Point Reserved;
+            public Point MaxSize;
+            public Point MaxPosition;
+            public Point MinTrackSize;
+            public Point MaxTrackSize;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
+        private struct MonitorInfo
+        {
+            public int Size;
+            public Rect Monitor;
+            public Rect Work;
+            public int Flags;
+        }
     }
 
     private void OnClosing(object? sender, CancelEventArgs e)
