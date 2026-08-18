@@ -1,3 +1,5 @@
+import logoUrl from './assets/logo.png';
+
 export type View = 'launcher' | 'tools' | 'sessions' | 'settings';
 
 const ICONS = {
@@ -16,7 +18,7 @@ export function Rail({ view, onView, version }: { view: View; onView: (v: View) 
   return (
     <aside className="rail">
       <div className="brand">
-        <div className="brand-mark">F/</div>
+        <img className="brand-mark" src={logoUrl} alt="ForgeDeck" />
         <div><strong>forge</strong><small>TOOL LAUNCHER</small></div>
       </div>
       <div className="nav-label">工作台</div>

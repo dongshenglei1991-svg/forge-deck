@@ -1,5 +1,9 @@
 # ForgeDeck
 
+<p align="center">
+  <img src="ui/src/assets/logo.png" width="160" alt="ForgeDeck" />
+</p>
+
 本地 AI 编程工具快速启动器（仅 Windows）。
 
 功能：扫描本机已安装的 AI 编程工具，为每个工具维护启动配置（参数 / 环境变量 / 工作目录 / 打开方式），支持内嵌终端打开与独立窗口打开，并记录工作目录历史。
