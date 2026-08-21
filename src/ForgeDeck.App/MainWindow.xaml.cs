@@ -1,8 +1,10 @@
 using System.ComponentModel;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Text.Json;
 using System.Windows;
 using System.Windows.Interop;
+using System.Windows.Media;
 using ForgeDeck.Core;
 using ForgeDeck.Core.Bridge;
 using ForgeDeck.Core.Config;
@@ -89,7 +91,12 @@ public partial class MainWindow : Window
         });
         d.Register("window.beginDrag", _ =>
         {
-            BeginDrag();
+            BeginNonClient(Win32.HTCAPTION);
+            return Task.FromResult<object?>(null);
+        });
+        d.Register("window.beginResize", p =>
+        {
+            BeginNonClient(HitTestFromEdge(p));
             return Task.FromResult<object?>(null);
         });
         d.Register("window.getState", _ =>
@@ -155,6 +162,13 @@ public partial class MainWindow : Window
         if (msg == Win32.WM_GETMINMAXINFO)
         {
             handled = Win32.TryApplyWorkArea(hwnd, lParam);
+            if (handled)
+            {
+                var dpi = VisualTreeHelper.GetDpi(this);
+                Win32.ApplyMinTrackSize(lParam,
+                    (int)Math.Ceiling(MinWidth * dpi.DpiScaleX),
+                    (int)Math.Ceiling(MinHeight * dpi.DpiScaleY));
+            }
         }
         else if (msg == Win32.WM_QUERYENDSESSION)
         {
@@ -234,14 +248,34 @@ public partial class MainWindow : Window
 
     /// <summary>鼠标按下发生在 WebView2 子窗口内，WPF 输入系统看不到（Mouse.LeftButton 始终为 Released），
     /// Window.DragMove() 因此必抛 InvalidOperationException。改用真实按键状态判定，
-    /// 以 HTCAPTION 非客户区消息进入系统原生移动循环。</summary>
-    private void BeginDrag()
+    /// 以非客户区消息进入系统原生移动/缩放循环。WebView2 盖住整块客户区，WindowChrome
+    /// 的 8px 调整边框收不到命中，缩放必须由前端边缘热区调 window.beginResize。</summary>
+    private void BeginNonClient(int hitTest)
     {
+        if (hitTest == 0) return;
         if (WindowState == WindowState.Maximized) return;
         if ((Win32.GetAsyncKeyState(Win32.VK_LBUTTON) & 0x8000) == 0) return; // 往返期间左键已松开
         var hwnd = new WindowInteropHelper(this).Handle;
         Win32.ReleaseCapture();
-        Win32.SendMessage(hwnd, Win32.WM_NCLBUTTONDOWN, (IntPtr)Win32.HTCAPTION, IntPtr.Zero);
+        Win32.SendMessage(hwnd, Win32.WM_NCLBUTTONDOWN, (IntPtr)hitTest, IntPtr.Zero);
+    }
+
+    private static int HitTestFromEdge(JsonElement? p)
+    {
+        if (p is not { } json || !json.TryGetProperty("edge", out var prop) || prop.ValueKind != JsonValueKind.String)
+            return 0;
+        return prop.GetString() switch
+        {
+            "n" => Win32.HTTOP,
+            "s" => Win32.HTBOTTOM,
+            "e" => Win32.HTRIGHT,
+            "w" => Win32.HTLEFT,
+            "ne" => Win32.HTTOPRIGHT,
+            "nw" => Win32.HTTOPLEFT,
+            "se" => Win32.HTBOTTOMRIGHT,
+            "sw" => Win32.HTBOTTOMLEFT,
+            _ => 0,
+        };
     }
 
     private static class Win32
@@ -251,6 +285,14 @@ public partial class MainWindow : Window
         internal const int WM_GETMINMAXINFO = 0x0024;
         internal const int WM_QUERYENDSESSION = 0x0011;
         internal const int HTCAPTION = 0x2;
+        internal const int HTLEFT = 10;
+        internal const int HTRIGHT = 11;
+        internal const int HTTOP = 12;
+        internal const int HTTOPLEFT = 13;
+        internal const int HTTOPRIGHT = 14;
+        internal const int HTBOTTOM = 15;
+        internal const int HTBOTTOMLEFT = 16;
+        internal const int HTBOTTOMRIGHT = 17;
         private const uint MonitorDefaultToNearest = 2;
 
         [DllImport("user32.dll")]
@@ -284,6 +326,14 @@ public partial class MainWindow : Window
             mmi.MaxSize = new Point { X = place.Width, Y = place.Height };
             Marshal.StructureToPtr(mmi, lParam, fDeleteOld: true);
             return true;
+        }
+
+        internal static void ApplyMinTrackSize(IntPtr lParam, int minWidth, int minHeight)
+        {
+            if (minWidth <= 0 || minHeight <= 0) return;
+            var mmi = Marshal.PtrToStructure<MinMaxInfo>(lParam);
+            mmi.MinTrackSize = new Point { X = minWidth, Y = minHeight };
+            Marshal.StructureToPtr(mmi, lParam, fDeleteOld: true);
         }
 
         [StructLayout(LayoutKind.Sequential)]

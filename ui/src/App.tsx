@@ -11,6 +11,7 @@ import { ConfigPanel } from './ConfigPanel';
 import { ToolsView } from './ToolsView';
 import { SettingsView } from './SettingsView';
 import { Toast, type ToastItem } from './Toast';
+import { ResizeHandles } from './ResizeHandles';
 import type { AppInfo, AppSettings, HiddenTool, LaunchProfile, SettingsInfo, TerminalSessionInfo, ToolListItem } from './types';
 
 const VIEW_TITLES: Record<View, string> = { launcher: '快速启动', tools: '工具库', sessions: '终端会话', settings: '设置' };
@@ -370,6 +371,7 @@ export default function App() {
   const handleFileTreeError = useCallback((msg: string) => toast(msg, 'error'), [toast]);
 
   return (
+    <>
     <div className={`app${termStage ? ' term-stage' : ''}`}>
       <Rail view={view} onView={setView} version={appInfo ? `v${appInfo.version} · Windows` : ''} />
       <TopBar title={VIEW_TITLES[view]} userName={settingsInfo?.userName ?? ''} onRefresh={handleRescan} />
@@ -434,5 +436,7 @@ export default function App() {
         }} />
       <Toast items={toasts} />
     </div>
+    <ResizeHandles />
+    </>
   );
 }

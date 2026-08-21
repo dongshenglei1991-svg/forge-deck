@@ -321,6 +321,7 @@ class MockBridge implements Bridge {
       case 'window.minimize':
       case 'window.toggleMaximize':
       case 'window.beginDrag':
+      case 'window.beginResize':
         return null; // 浏览器预览无窗口控制，静默
       case 'window.close': {
         const behavior = this.settings.settings.closeBehavior;
