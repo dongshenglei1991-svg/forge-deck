@@ -3,6 +3,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import { bridge } from './bridge';
+import { FileTreePanel } from './FileTreePanel';
 import type { TerminalSessionInfo } from './types';
 
 // 若 xterm canvas 渲染不支持 oklch（表现为黑底/默认色），换成十六进制近似值：
@@ -21,10 +22,12 @@ function ignoreSessionGone(e: unknown) {
   if (!msg.startsWith('session-gone')) console.error(e);
 }
 
-export function TerminalPanel({ sessions, activeId, visible, onActivate, onNewSession, onCloseSession }: {
+export function TerminalPanel({ sessions, activeId, visible, workdir, onError, onActivate, onNewSession, onCloseSession }: {
   sessions: TerminalSessionInfo[];
   activeId: string | null;
   visible: boolean;
+  workdir: string | null;
+  onError: (msg: string) => void;
   onActivate: (id: string) => void;
   onNewSession: () => void;
   onCloseSession: (id: string) => void;
@@ -102,30 +105,33 @@ export function TerminalPanel({ sessions, activeId, visible, onActivate, onNewSe
 
   return (
     <section className="terminal">
-      <div className="term-tabs" id="termTabs">
-        {sessions.map((s) => (
-          <button key={s.sessionId} className={`term-tab${s.sessionId === activeId ? ' active' : ''}`}
-            onClick={() => onActivate(s.sessionId)}>
-            <span className={`status-dot${s.running ? '' : ' exited'}`} />{s.title}
-            <span className="close" role="button" aria-label="关闭会话"
-              onClick={(e) => { e.stopPropagation(); onCloseSession(s.sessionId); }}>×</span>
+      <FileTreePanel root={workdir} onError={onError} />
+      <div className="term-main">
+        <div className="term-tabs" id="termTabs">
+          {sessions.map((s) => (
+            <button key={s.sessionId} className={`term-tab${s.sessionId === activeId ? ' active' : ''}`}
+              onClick={() => onActivate(s.sessionId)}>
+              <span className={`status-dot${s.running ? '' : ' exited'}`} />{s.title}
+              <span className="close" role="button" aria-label="关闭会话"
+                onClick={(e) => { e.stopPropagation(); onCloseSession(s.sessionId); }}>×</span>
+            </button>
+          ))}
+          <button className="icon-btn term-add" id="newTabBtn" title="新建终端标签" onClick={onNewSession}>
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><path d="M12 5v14M5 12h14" /></svg>
           </button>
-        ))}
-        <button className="icon-btn term-add" id="newTabBtn" title="新建终端标签" onClick={onNewSession}>
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><path d="M12 5v14M5 12h14" /></svg>
-        </button>
-      </div>
-      {sessions.length === 0 && (
-        <div className="term-empty">
-          <p>还没有会话。从快速启动打开工具，或新建空白会话。</p>
-          <button className="btn" onClick={onNewSession}>新建空白会话</button>
         </div>
-      )}
-      {sessions.map((s) => (
-        <div key={s.sessionId}
-          ref={(el) => { if (el) containers.current.set(s.sessionId, el); else containers.current.delete(s.sessionId); }}
-          className="term-body" style={{ display: s.sessionId === activeId ? 'block' : 'none' }} />
-      ))}
+        {sessions.length === 0 && (
+          <div className="term-empty">
+            <p>还没有会话。从快速启动打开工具，或新建空白会话。</p>
+            <button className="btn" onClick={onNewSession}>新建空白会话</button>
+          </div>
+        )}
+        {sessions.map((s) => (
+          <div key={s.sessionId}
+            ref={(el) => { if (el) containers.current.set(s.sessionId, el); else containers.current.delete(s.sessionId); }}
+            className="term-body" style={{ display: s.sessionId === activeId ? 'block' : 'none' }} />
+        ))}
+      </div>
     </section>
   );
 }

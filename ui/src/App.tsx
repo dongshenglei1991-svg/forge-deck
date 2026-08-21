@@ -372,6 +372,8 @@ export default function App() {
         </section>
         <section className="view-panel" data-view-panel="sessions" hidden={view !== 'sessions'}>
           <TerminalPanel visible={termStage} sessions={sessions} activeId={activeSessionId}
+            workdir={sessions.find((s) => s.sessionId === activeSessionId)?.workdir ?? null}
+            onError={(msg) => toast(msg, 'error')}
             onActivate={setActiveSessionId} onNewSession={handleNewShell} onCloseSession={handleCloseSession} />
         </section>
         <section className="view-panel" data-view-panel="settings" hidden={view !== 'settings'}>
