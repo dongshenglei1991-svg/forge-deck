@@ -451,4 +451,44 @@ public class BridgeTests : IDisposable
         var resp = await _bridge.Dispatcher.HandleAsync("""{"id":15,"method":"workdirs.list"}""");
         Assert.Equal(_dir, ResultOf(resp!)[0].GetString());
     }
+
+    [Fact]
+    public async Task FsList_ListsTempDirectory()
+    {
+        // Load 不会落盘；Save 后根上才有 config.json（计划假设 Load 后已有）
+        _store.Save();
+        var sub = Path.Combine(_dir, "src");
+        Directory.CreateDirectory(sub);
+        File.WriteAllText(Path.Combine(_dir, "a.ts"), "");
+        var json = _dir.Replace("\\", "\\\\");
+        var resp = await _bridge.Dispatcher.HandleAsync(
+            $$$"""{"id":80,"method":"fs.list","params":{"path":"{{{json}}}","root":"{{{json}}}"}}""");
+        Assert.Null(ErrorOf(resp!));
+        var names = ResultOf(resp!).GetProperty("entries").EnumerateArray().Select(e => e.GetProperty("name").GetString()).ToArray();
+        Assert.Contains("src", names);
+        Assert.Contains("a.ts", names);
+        Assert.Contains("config.json", names);
+        var ts = ResultOf(resp!).GetProperty("entries").EnumerateArray().Single(e => e.GetProperty("name").GetString() == "a.ts");
+        Assert.False(ts.GetProperty("isDirectory").GetBoolean());
+        Assert.Equal("ts", ts.GetProperty("extension").GetString());
+    }
+
+    [Fact]
+    public async Task FsList_MissingParams_ReturnsValidationNotThrow()
+    {
+        var resp = await _bridge.Dispatcher.HandleAsync("""{"id":81,"method":"fs.list"}""");
+        Assert.Equal("validation", ErrorOf(resp!)!.Value.Code);
+        Assert.Equal("路径不能为空", ErrorOf(resp!)!.Value.Message);
+    }
+
+    [Fact]
+    public async Task FsList_EscapingRoot_ReturnsValidation()
+    {
+        var rootJson = _dir.Replace("\\", "\\\\");
+        var parentJson = Path.GetFullPath(Path.Combine(_dir, "..")).Replace("\\", "\\\\");
+        var resp = await _bridge.Dispatcher.HandleAsync(
+            $$$"""{"id":82,"method":"fs.list","params":{"path":"{{{parentJson}}}","root":"{{{rootJson}}}"}}""");
+        Assert.Equal("validation", ErrorOf(resp!)!.Value.Code);
+        Assert.Equal("路径超出工作目录", ErrorOf(resp!)!.Value.Message);
+    }
 }

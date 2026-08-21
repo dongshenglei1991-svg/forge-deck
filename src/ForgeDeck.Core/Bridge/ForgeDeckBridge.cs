@@ -1,5 +1,6 @@
 using System.Text.Json;
 using ForgeDeck.Core.Config;
+using ForgeDeck.Core.Files;
 using ForgeDeck.Core.Launching;
 using ForgeDeck.Core.Scanning;
 using ForgeDeck.Core.Terminal;
@@ -13,8 +14,9 @@ public sealed record AppInfo(string Version, string UserName, DateTime? LastScan
 public sealed record SettingsInfo(AppSettings Settings, IReadOnlyList<CommonDir> CommonDirs, string UserName);
 
 /// <summary>业务方法接线。线程模型：handler 由宿主在 UI 线程串行调用，ConfigStore 变更无需加锁；
-/// 唯一例外 tools.rescan——扫描与合并已 Task.Run 化，且只读脱离 store 的快照、不触碰 ConfigStore，
-/// 合并结果回 UI 线程写回。终端 Output/Exited/Changed 事件来自后台线程，经 Dispatcher.Emit 透传
+/// 例外：tools.rescan——扫描与合并已 Task.Run 化，且只读脱离 store 的快照、不触碰 ConfigStore，
+/// 合并结果回 UI 线程写回；fs.list——只读磁盘枚举亦 Task.Run，不碰 ConfigStore。
+/// 终端 Output/Exited/Changed 事件来自后台线程，经 Dispatcher.Emit 透传
 /// （Emit 仅做序列化，不写共享状态）。</summary>
 public sealed class ForgeDeckBridge
 {
@@ -346,6 +348,20 @@ public sealed class ForgeDeckBridge
         {
             _terminal.Close(p?.GetProperty("sessionId").GetString() ?? "");
             return Task.FromResult<object?>(null);
+        });
+
+        Dispatcher.Register("fs.list", async p =>
+        {
+            var path = "";
+            var root = "";
+            if (p is JsonElement pe)
+            {
+                if (pe.TryGetProperty("path", out var pathEl) && pathEl.ValueKind == JsonValueKind.String)
+                    path = pathEl.GetString() ?? "";
+                if (pe.TryGetProperty("root", out var rootEl) && rootEl.ValueKind == JsonValueKind.String)
+                    root = rootEl.GetString() ?? "";
+            }
+            return await Task.Run(() => DirectoryLister.List(path, root));
         });
 
         Dispatcher.Register("launch.external", p =>
