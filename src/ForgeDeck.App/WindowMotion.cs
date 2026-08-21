@@ -52,12 +52,18 @@ internal sealed class WindowMotion
     /// <summary>动画进行中：此时别让系统移动/缩放循环插进来抢窗口。</summary>
     public bool Busy { get; private set; }
 
-    /// <summary>无边框窗口丢掉 WS_CAPTION 后 DWM 最小化过渡会消失；补回样式并明确允许过渡。
-    /// 属性 3 是 DWMWA_TRANSITIONS_FORCEDISABLED：TRUE 是关掉动画，不是打开。</summary>
+    /// <summary>WindowStyle=None 的窗口缺少最小化/还原所需的样式位，DWM 的最小化过渡会
+    /// 消失；补回 WS_SYSMENU|WS_MINIMIZEBOX|WS_MAXIMIZEBOX 并明确允许过渡。
+    /// 属性 3 是 DWMWA_TRANSITIONS_FORCEDISABLED：TRUE 是关掉动画，不是打开。
+    ///
+    /// 千万别把 WS_CAPTION 一起补上。它是这几位里唯一影响边框度量的（WS_BORDER|
+    /// WS_DLGFRAME），带上它以后 USER32 会把最大化矩形按边框宽度往外扩一圈（实测 125%
+    /// 缩放下四边各 7 逻辑像素），而 WindowChrome 把客户区拉平到了整个窗口矩形 ——
+    /// 那一圈就成了跑到屏幕外的客户区，右边和下边的内容被切掉。</summary>
     public static void InstallSystemTransitions(IntPtr hwnd)
     {
         var style = Native.GetWindowLong(hwnd, Native.GwlStyle).ToInt64();
-        style |= Native.WsCaption | Native.WsSysMenu | Native.WsMinimizeBox | Native.WsMaximizeBox;
+        style |= Native.WsSysMenu | Native.WsMinimizeBox | Native.WsMaximizeBox;
         Native.SetWindowLong(hwnd, Native.GwlStyle, new IntPtr(style));
         Native.SetWindowPos(hwnd, IntPtr.Zero, 0, 0, 0, 0,
             Native.SwpNoMove | Native.SwpNoSize | Native.SwpNoZOrder | Native.SwpNoActivate | Native.SwpFrameChanged);
@@ -259,7 +265,6 @@ internal sealed class WindowMotion
     private static class Native
     {
         internal const int GwlStyle = -16;
-        internal const int WsCaption = 0x00C00000;
         internal const int WsSysMenu = 0x00080000;
         internal const int WsMinimizeBox = 0x00020000;
         internal const int WsMaximizeBox = 0x00010000;
