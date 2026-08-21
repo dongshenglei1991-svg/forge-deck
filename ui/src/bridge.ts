@@ -144,7 +144,7 @@ class MockBridge implements Bridge {
     return fresh;
   }
 
-  private static readonly mockTree: Record<string, FsEntry[]> = {
+  private readonly mockTree: Record<string, FsEntry[]> = {
     'C:\\Projects\\atlas-web': [
       e('src', 'C:\\Projects\\atlas-web\\src', true, ''),
       e('node_modules', 'C:\\Projects\\atlas-web\\node_modules', true, ''),
@@ -283,16 +283,39 @@ class MockBridge implements Bridge {
         this.workdirs.splice(this.workdirs.indexOf(p.path), 1);
         return this.workdirs;
       case 'fs.list': {
-        const root = String(p?.root ?? '');
-        const path = String(p?.path ?? '');
-        if (!root.trim() || !path.trim()) throw new Error('validation: 路径不能为空');
-        const prefix = root.endsWith('\\') ? root : root + '\\';
-        const under = path.toLowerCase() === root.toLowerCase()
-          || path.toLowerCase().startsWith(prefix.toLowerCase());
-        if (!under) throw new Error('validation: 路径超出工作目录');
-        const entries = MockBridge.mockTree[path];
+        const { path } = this.guardFs(p);
+        const entries = this.mockTree[path];
         if (!entries) throw new Error('not_found: 目录不存在');
         return { path, entries } satisfies FsListResult;
+      }
+      case 'fs.open': {
+        const { path } = this.guardFs(p);
+        const kind = this.mockKind(path);
+        if (kind === 'dir') throw new Error('validation: 只能打开文件');
+        if (kind === 'missing') throw new Error('not_found: 文件不存在');
+        return null;
+      }
+      case 'fs.openWithSystem': {
+        const { path } = this.guardFs(p);
+        if (this.mockKind(path) === 'missing') throw new Error('not_found: 路径不存在');
+        return null;
+      }
+      case 'fs.delete': {
+        const { path, root } = this.guardFs(p);
+        if (path.toLowerCase() === root.toLowerCase()) throw new Error('validation: 不能删除工作目录根');
+        if (this.mockKind(path) === 'missing') throw new Error('not_found: 路径不存在');
+        const prefix = path + '\\';
+        for (const key of Object.keys(this.mockTree)) {
+          if (key === path || key.startsWith(prefix)) delete this.mockTree[key];
+        }
+        const slash = path.lastIndexOf('\\');
+        const parent = slash >= 0 ? path.slice(0, slash) : path;
+        const list = this.mockTree[parent];
+        if (list) {
+          const i = list.findIndex((e) => e.path.toLowerCase() === path.toLowerCase());
+          if (i >= 0) list.splice(i, 1);
+        }
+        return null;
       }
       case 'sessions.list':
         return [...this.sessions]; // 真实桥每次返回新 JSON 数组；副本保证 React 依赖比较生效
@@ -349,6 +372,29 @@ class MockBridge implements Bridge {
       default:
         throw new Error(`未知方法：${method}`);
     }
+  }
+
+  private guardFs(p: any): { path: string; root: string } {
+    const root = String(p?.root ?? '');
+    const path = String(p?.path ?? '');
+    if (!root.trim() || !path.trim()) throw new Error('validation: 路径不能为空');
+    const prefix = root.endsWith('\\') ? root : root + '\\';
+    const under = path.toLowerCase() === root.toLowerCase()
+      || path.toLowerCase().startsWith(prefix.toLowerCase());
+    if (!under) throw new Error('validation: 路径超出工作目录');
+    return { path, root };
+  }
+
+  private mockKind(path: string): 'file' | 'dir' | 'missing' {
+    const p = path.toLowerCase();
+    for (const key of Object.keys(this.mockTree)) {
+      if (key.toLowerCase() === p) return 'dir';
+    }
+    for (const entries of Object.values(this.mockTree)) {
+      const hit = entries.find((e) => e.path.toLowerCase() === p);
+      if (hit) return hit.isDirectory ? 'dir' : 'file';
+    }
+    return 'missing';
   }
 
   private mockOutput(id: string, title: string) {

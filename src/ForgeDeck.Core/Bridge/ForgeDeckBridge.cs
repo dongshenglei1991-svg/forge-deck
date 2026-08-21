@@ -15,7 +15,7 @@ public sealed record SettingsInfo(AppSettings Settings, IReadOnlyList<CommonDir>
 
 /// <summary>业务方法接线。线程模型：handler 由宿主在 UI 线程串行调用，ConfigStore 变更无需加锁；
 /// 例外：tools.rescan——扫描与合并已 Task.Run 化，且只读脱离 store 的快照、不触碰 ConfigStore，
-/// 合并结果回 UI 线程写回；fs.list——只读磁盘枚举亦 Task.Run，不碰 ConfigStore。
+/// 合并结果回 UI 线程写回；fs.list / fs.open / fs.openWithSystem / fs.delete——磁盘与壳操作亦 Task.Run，不碰 ConfigStore。
 /// 终端 Output/Exited/Changed 事件来自后台线程，经 Dispatcher.Emit 透传
 /// （Emit 仅做序列化，不写共享状态）。</summary>
 public sealed class ForgeDeckBridge
@@ -30,14 +30,16 @@ public sealed class ForgeDeckBridge
     private readonly TerminalSessionManager _terminal;
     private readonly LaunchService _launch = new();
     private readonly WorkdirHistoryService _workdirs;
+    private readonly IShellOpener _shell;
 
     public BridgeDispatcher Dispatcher { get; }
 
-    public ForgeDeckBridge(ConfigStore store, ToolScanner scanner, TerminalSessionManager terminal)
+    public ForgeDeckBridge(ConfigStore store, ToolScanner scanner, TerminalSessionManager terminal, IShellOpener? shell = null)
     {
         _store = store;
         _scanner = scanner;
         _terminal = terminal;
+        _shell = shell ?? new ProcessShellOpener();
         _workdirs = new WorkdirHistoryService(store);
         Dispatcher = new BridgeDispatcher();
         RegisterMethods();
@@ -352,16 +354,29 @@ public sealed class ForgeDeckBridge
 
         Dispatcher.Register("fs.list", async p =>
         {
-            var path = "";
-            var root = "";
-            if (p is JsonElement pe)
-            {
-                if (pe.TryGetProperty("path", out var pathEl) && pathEl.ValueKind == JsonValueKind.String)
-                    path = pathEl.GetString() ?? "";
-                if (pe.TryGetProperty("root", out var rootEl) && rootEl.ValueKind == JsonValueKind.String)
-                    root = rootEl.GetString() ?? "";
-            }
+            var (path, root) = FsArgs(p);
             return await Task.Run(() => DirectoryLister.List(path, root));
+        });
+
+        Dispatcher.Register("fs.open", async p =>
+        {
+            var (path, root) = FsArgs(p);
+            await Task.Run(() => FileOps.Open(path, root, _shell));
+            return null;
+        });
+
+        Dispatcher.Register("fs.openWithSystem", async p =>
+        {
+            var (path, root) = FsArgs(p);
+            await Task.Run(() => FileOps.OpenWithSystem(path, root, _shell));
+            return null;
+        });
+
+        Dispatcher.Register("fs.delete", async p =>
+        {
+            var (path, root) = FsArgs(p);
+            await Task.Run(() => FileOps.Delete(path, root));
+            return null;
         });
 
         Dispatcher.Register("launch.external", p =>
@@ -552,6 +567,20 @@ public sealed class ForgeDeckBridge
         var cols = p?.TryGetProperty("cols", out var c) == true && c.TryGetInt32(out var cv) ? cv : 120;
         var rows = p?.TryGetProperty("rows", out var r) == true && r.TryGetInt32(out var rv) ? rv : 30;
         return (cols, rows);
+    }
+
+    private static (string path, string root) FsArgs(JsonElement? p)
+    {
+        var path = "";
+        var root = "";
+        if (p is JsonElement pe)
+        {
+            if (pe.TryGetProperty("path", out var pathEl) && pathEl.ValueKind == JsonValueKind.String)
+                path = pathEl.GetString() ?? "";
+            if (pe.TryGetProperty("root", out var rootEl) && rootEl.ValueKind == JsonValueKind.String)
+                root = rootEl.GetString() ?? "";
+        }
+        return (path, root);
     }
 
     private static List<CommonDir> CommonDirs()

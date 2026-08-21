@@ -491,4 +491,50 @@ public class BridgeTests : IDisposable
         Assert.Equal("validation", ErrorOf(resp!)!.Value.Code);
         Assert.Equal("路径超出工作目录", ErrorOf(resp!)!.Value.Message);
     }
+
+    [Fact]
+    public async Task FsOpen_Directory_ReturnsValidation()
+    {
+        var json = _dir.Replace("\\", "\\\\");
+        var resp = await _bridge.Dispatcher.HandleAsync(
+            $$$"""{"id":83,"method":"fs.open","params":{"path":"{{{json}}}","root":"{{{json}}}"}}""");
+        Assert.Equal("validation", ErrorOf(resp!)!.Value.Code);
+        Assert.Equal("只能打开文件", ErrorOf(resp!)!.Value.Message);
+    }
+
+    [Fact]
+    public async Task FsDelete_File_RemovesAndMissingParamsStaySafe()
+    {
+        var file = Path.Combine(_dir, "gone.txt");
+        File.WriteAllText(file, "x");
+        var fileJson = file.Replace("\\", "\\\\");
+        var rootJson = _dir.Replace("\\", "\\\\");
+        var resp = await _bridge.Dispatcher.HandleAsync(
+            $$$"""{"id":84,"method":"fs.delete","params":{"path":"{{{fileJson}}}","root":"{{{rootJson}}}"}}""");
+        Assert.Null(ErrorOf(resp!));
+        Assert.False(File.Exists(file));
+
+        var missing = await _bridge.Dispatcher.HandleAsync("""{"id":85,"method":"fs.delete"}""");
+        Assert.Equal("validation", ErrorOf(missing!)!.Value.Code);
+        Assert.Equal("路径不能为空", ErrorOf(missing!)!.Value.Message);
+    }
+
+    [Fact]
+    public async Task FsDelete_Root_ReturnsValidation()
+    {
+        var json = _dir.Replace("\\", "\\\\");
+        var resp = await _bridge.Dispatcher.HandleAsync(
+            $$$"""{"id":86,"method":"fs.delete","params":{"path":"{{{json}}}","root":"{{{json}}}"}}""");
+        Assert.Equal("validation", ErrorOf(resp!)!.Value.Code);
+        Assert.Equal("不能删除工作目录根", ErrorOf(resp!)!.Value.Message);
+        Assert.True(Directory.Exists(_dir));
+    }
+
+    [Fact]
+    public async Task FsOpenWithSystem_MissingParams_ReturnsValidationNotThrow()
+    {
+        var resp = await _bridge.Dispatcher.HandleAsync("""{"id":87,"method":"fs.openWithSystem"}""");
+        Assert.Equal("validation", ErrorOf(resp!)!.Value.Code);
+        Assert.Equal("路径不能为空", ErrorOf(resp!)!.Value.Message);
+    }
 }

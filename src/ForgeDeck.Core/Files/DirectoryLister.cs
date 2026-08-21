@@ -9,13 +9,7 @@ public static class DirectoryLister
 {
     public static FsListResult List(string path, string root)
     {
-        if (string.IsNullOrWhiteSpace(path) || string.IsNullOrWhiteSpace(root))
-            throw new BridgeException("validation", "路径不能为空");
-
-        var fullRoot = Normalize(root);
-        var fullPath = Normalize(path);
-        if (!IsUnderRoot(fullPath, fullRoot))
-            throw new BridgeException("validation", "路径超出工作目录");
+        var (fullPath, _) = FsPaths.ResolveUnderRoot(path, root);
         if (!Directory.Exists(fullPath))
             throw new BridgeException("not_found", "目录不存在");
 
@@ -56,20 +50,4 @@ public static class DirectoryLister
         });
         return new FsListResult(fullPath, entries);
     }
-
-    private static string Normalize(string p)
-    {
-        try
-        {
-            return Path.GetFullPath(p).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        }
-        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
-        {
-            throw new BridgeException("validation", "路径不能为空");
-        }
-    }
-
-    private static bool IsUnderRoot(string full, string root) =>
-        full.Equals(root, StringComparison.OrdinalIgnoreCase)
-        || full.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
 }

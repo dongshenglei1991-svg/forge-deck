@@ -64,7 +64,20 @@
   font: 12px/1.45 var(--font-mono); color: var(--fg); white-space: nowrap; user-select: none;
 }
 .file-tree-row.dir { cursor: pointer; }
-.file-tree-row:hover { background: var(--fg-soft); }
+.file-tree-row:hover, .file-tree-row.is-menu, .file-tree-name.is-menu { background: var(--fg-soft); }
+.ctx-menu {
+  position: fixed; z-index: 40; min-width: 196px; padding: 6px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+  box-shadow: 0 16px 42px color-mix(in oklch, var(--bg) 72%, transparent);
+}
+.ctx-menu button {
+  display: block; width: 100%; padding: 7px 10px; border: 0; border-radius: 4px;
+  background: transparent; color: var(--fg); text-align: left; font-size: 12px;
+}
+.ctx-menu button:hover { background: var(--fg-soft); }
+.ctx-menu button.danger { color: var(--danger); }
+.ctx-menu button.danger:hover { background: color-mix(in oklch, var(--danger) 14%, transparent); }
+.ctx-menu-sep { height: 1px; margin: 5px 6px; background: var(--border); }
 .file-tree-item { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .file-chevron { width: 10px; color: var(--muted); font-size: 10px; flex-shrink: 0; display: inline-block; }
 .file-chevron.open { transform: rotate(90deg); }
