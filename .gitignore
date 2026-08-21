@@ -16,3 +16,6 @@ ui/dist/
 # 本地运行产物
 *.log
 publish/
+
+# Superpowers 本地会话（头脑风暴原型、SDD 账本），与 docs/superpowers 规格/计划无关
+.superpowers/
