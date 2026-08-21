@@ -73,7 +73,11 @@ public partial class App : Application
         {
             while (!token.IsCancellationRequested)
             {
-                if (!ev.WaitOne(TimeSpan.FromMilliseconds(500))) continue;
+                try
+                {
+                    if (!ev.WaitOne(TimeSpan.FromMilliseconds(500))) continue;
+                }
+                catch (ObjectDisposedException) { break; }
                 try
                 {
                     Dispatcher.BeginInvoke(() =>
