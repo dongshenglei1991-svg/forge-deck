@@ -2,6 +2,7 @@ namespace ForgeDeck.Core;
 
 public enum ToolType { Cli, Gui }
 public enum OpenMode { Embedded, External }
+public enum CloseBehavior { Ask, Exit, MinimizeToTray }
 
 public sealed class ToolInfo
 {
@@ -35,6 +36,7 @@ public sealed class AppSettings
     public bool SkipExitConfirm { get; set; }
     public bool PreferEmbedded { get; set; } = true;
     public int MaxWorkdirHistory { get; set; } = 20;
+    public CloseBehavior CloseBehavior { get; set; } = CloseBehavior.Ask;
 }
 
 public sealed class LastUsedInfo

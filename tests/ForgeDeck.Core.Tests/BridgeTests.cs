@@ -250,10 +250,12 @@ public class BridgeTests : IDisposable
         Assert.True(result.GetProperty("commonDirs").GetArrayLength() > 0);
 
         var saveResp = await _bridge.Dispatcher.HandleAsync(
-            """{"id":13,"method":"settings.save","params":{"settings":{"defaultShell":"cmd","autoScanOnStartup":false,"extraScanDirs":["D:\\Tools"],"skipExitConfirm":true,"preferEmbedded":false,"maxWorkdirHistory":20}}}""");
+            """{"id":13,"method":"settings.save","params":{"settings":{"defaultShell":"cmd","autoScanOnStartup":false,"extraScanDirs":["D:\\Tools"],"skipExitConfirm":true,"preferEmbedded":false,"maxWorkdirHistory":20,"closeBehavior":"minimizeToTray"}}}""");
         Assert.Equal("cmd", ResultOf(saveResp!).GetProperty("settings").GetProperty("defaultShell").GetString());
         Assert.False(_store.Config.Settings.AutoScanOnStartup);
         Assert.True(_store.Config.Settings.SkipExitConfirm);
+        Assert.Equal("minimizeToTray", ResultOf(saveResp!).GetProperty("settings").GetProperty("closeBehavior").GetString());
+        Assert.Equal(CloseBehavior.MinimizeToTray, _store.Config.Settings.CloseBehavior);
     }
 
     [Fact]

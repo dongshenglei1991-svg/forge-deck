@@ -94,6 +94,29 @@ public class ConfigStoreTests : IDisposable
     }
 
     [Fact]
+    public void Load_OldSettingsWithoutCloseBehavior_DefaultsToAsk()
+    {
+        var path = PathFor("config.json");
+        File.WriteAllText(path, """{"version":1,"settings":{"defaultShell":"pwsh"}}""");
+        var store = new ConfigStore(path);
+        store.Load();
+        Assert.Equal(CloseBehavior.Ask, store.Config.Settings.CloseBehavior);
+    }
+
+    [Fact]
+    public void SaveThenLoad_RoundTripsCloseBehavior()
+    {
+        var path = PathFor("config.json");
+        var store = new ConfigStore(path);
+        store.Config.Settings.CloseBehavior = CloseBehavior.MinimizeToTray;
+        store.Save();
+        Assert.Contains("\"closeBehavior\": \"minimizeToTray\"", File.ReadAllText(path));
+        var reloaded = new ConfigStore(path);
+        reloaded.Load();
+        Assert.Equal(CloseBehavior.MinimizeToTray, reloaded.Config.Settings.CloseBehavior);
+    }
+
+    [Fact]
     public void Load_CorruptFile_BackupFails_StillReturnsDefaults()
     {
         var path = PathFor("config.json");
