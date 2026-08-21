@@ -5,6 +5,13 @@ namespace ForgeDeck.App;
 
 public partial class App : Application
 {
+    private const string MutexName = @"Local\ForgeDeck.SingleInstance";
+    private const string ShowEventName = @"Local\ForgeDeck.ShowWindow";
+
+    private Mutex? _mutex;
+    private EventWaitHandle? _showEvent;
+    private CancellationTokenSource? _showCts;
+
     private static readonly string CrashLog =
         Path.Combine(Path.GetTempPath(), "forgedeck-crash.log");
 
@@ -50,6 +57,40 @@ public partial class App : Application
 
     protected override void OnStartup(StartupEventArgs e)
     {
+        _mutex = new Mutex(true, MutexName, out var created);
+        if (!created)
+        {
+            SignalExistingInstance();
+            Shutdown();
+            return;
+        }
+
+        _showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, ShowEventName);
+        _showCts = new CancellationTokenSource();
+        var token = _showCts.Token;
+        var ev = _showEvent;
+        var waiter = new Thread(() =>
+        {
+            while (!token.IsCancellationRequested)
+            {
+                if (!ev.WaitOne(TimeSpan.FromMilliseconds(500))) continue;
+                try
+                {
+                    Dispatcher.BeginInvoke(() =>
+                    {
+                        if (MainWindow is MainWindow win)
+                            win.RestoreFromTray();
+                    });
+                }
+                catch (InvalidOperationException) { }
+            }
+        })
+        {
+            IsBackground = true,
+            Name = "ForgeDeck.ShowWindow",
+        };
+        waiter.Start();
+
         base.OnStartup(e);
         DispatcherUnhandledException += (_, args) =>
         {
@@ -65,5 +106,32 @@ public partial class App : Application
             Log("UnobservedTaskException", args.Exception);
             args.SetObserved();
         };
+    }
+
+    protected override void OnExit(ExitEventArgs e)
+    {
+        _showCts?.Cancel();
+        try { _showEvent?.Set(); } catch (ObjectDisposedException) { }
+        _showEvent?.Dispose();
+        try { _mutex?.ReleaseMutex(); } catch (ApplicationException) { }
+        _mutex?.Dispose();
+        base.OnExit(e);
+    }
+
+    private static void SignalExistingInstance()
+    {
+        for (var i = 0; i < 10; i++)
+        {
+            try
+            {
+                using var show = EventWaitHandle.OpenExisting(ShowEventName);
+                show.Set();
+                return;
+            }
+            catch (WaitHandleCannotBeOpenedException)
+            {
+                Thread.Sleep(50);
+            }
+        }
     }
 }
