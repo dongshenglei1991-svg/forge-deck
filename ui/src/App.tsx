@@ -5,6 +5,7 @@ import { TopBar } from './TopBar';
 import { LauncherView } from './LauncherView';
 import { TerminalPanel } from './TerminalPanel';
 import { AddToolModal } from './AddToolModal';
+import { ClosePromptModal } from './ClosePromptModal';
 import { ConfigPanel } from './ConfigPanel';
 import { ToolsView } from './ToolsView';
 import { SettingsView } from './SettingsView';
@@ -28,6 +29,7 @@ export default function App() {
   const [scanning, setScanning] = useState(false);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
+  const [closePromptOpen, setClosePromptOpen] = useState(false);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const toast = useCallback((text: string, kind: ToastItem['kind'] = 'info') => {
     const item: ToastItem = { id: Date.now() + Math.random(), text, kind };
@@ -305,6 +307,31 @@ export default function App() {
     }
   }, [toast]);
 
+  const applyCloseChoice = useCallback(async (action: 'tray' | 'exit', remember: boolean) => {
+    setClosePromptOpen(false);
+    if (remember && settingsInfo) {
+      const closeBehavior = action === 'tray' ? 'minimizeToTray' : 'exit' as const;
+      try {
+        setSettingsInfo(await bridge.request<SettingsInfo>('settings.save', {
+          settings: { ...settingsInfo.settings, closeBehavior },
+        }));
+      } catch (e: any) {
+        toast(e.message, 'error');
+      }
+    }
+    try {
+      await bridge.request(action === 'tray' ? 'window.hideToTray' : 'window.exit');
+    } catch (e: any) {
+      toast(e.message, 'error');
+    }
+  }, [settingsInfo, toast]);
+
+  useEffect(() => {
+    const offPrompt = bridge.on('window.close.prompt', () => setClosePromptOpen(true));
+    const offTray = bridge.on('window.tray.mocked', () => toast('已最小化到托盘（仅桌面壳生效）'));
+    return () => { offPrompt(); offTray(); };
+  }, [toast]);
+
   const termStage = view === 'sessions';
   const selectedTool = tools.find((t) => t.tool.id === selectedToolId) ?? null;
 
@@ -352,6 +379,11 @@ export default function App() {
         </section>
       </main>
       <AddToolModal open={addOpen} onClose={() => setAddOpen(false)} onConfirm={handleAddTool} />
+      <ClosePromptModal
+        open={closePromptOpen}
+        onDismiss={() => setClosePromptOpen(false)}
+        onMinimize={(remember) => void applyCloseChoice('tray', remember)}
+        onExit={(remember) => void applyCloseChoice('exit', remember)} />
       <Toast items={toasts} />
     </div>
   );

@@ -8,6 +8,7 @@ export function SettingsView({ info, onSave }: { info: SettingsInfo; onSave: (s:
   const [shell, setShell] = useState<string>(info.settings.defaultShell);
   const [skipExitConfirm, setSkipExitConfirm] = useState(info.settings.skipExitConfirm);
   const [preferEmbedded, setPreferEmbedded] = useState(info.settings.preferEmbedded);
+  const [closeBehavior, setCloseBehavior] = useState(info.settings.closeBehavior);
 
   useEffect(() => {
     setExtraDirs(info.settings.extraScanDirs.join('\n'));
@@ -15,6 +16,7 @@ export function SettingsView({ info, onSave }: { info: SettingsInfo; onSave: (s:
     setShell(info.settings.defaultShell);
     setSkipExitConfirm(info.settings.skipExitConfirm);
     setPreferEmbedded(info.settings.preferEmbedded);
+    setCloseBehavior(info.settings.closeBehavior);
   }, [info]);
 
   // 载荷侧校验：非法 shell（如手输 bash）回退 pwsh；输入框保留用户原文，不就地改写
@@ -26,6 +28,7 @@ export function SettingsView({ info, onSave }: { info: SettingsInfo; onSave: (s:
     extraScanDirs: extraDirs.split(/\r?\n/).map((s) => s.trim()).filter(Boolean),
     skipExitConfirm,
     preferEmbedded,
+    closeBehavior,
   });
 
   return (
@@ -58,6 +61,24 @@ export function SettingsView({ info, onSave }: { info: SettingsInfo; onSave: (s:
           </div>
           <Switch on={skipExitConfirm} label="关闭应用时不弹会话确认" onToggle={() => setSkipExitConfirm((v) => !v)} />
           <Switch on={preferEmbedded} label="优先使用内嵌终端" onToggle={() => setPreferEmbedded((v) => !v)} />
+        </article>
+        <article className="setting-card span-2">
+          <h2>关闭行为</h2>
+          <p>点击关闭按钮、按 Alt+F4 或从任务栏关闭窗口时。</p>
+          <div className="radio-list" role="radiogroup" aria-label="关闭行为">
+            {([
+              ['ask', '每次询问（关闭或最小化到托盘）'],
+              ['exit', '直接退出'],
+              ['minimizeToTray', '最小化到托盘'],
+            ] as const).map(([value, label]) => (
+              <label key={value} className="radio-row">
+                <input type="radio" name="closeBehavior" value={value}
+                  checked={closeBehavior === value}
+                  onChange={() => setCloseBehavior(value)} />
+                {label}
+              </label>
+            ))}
+          </div>
         </article>
       </div>
       <div className="setting-actions">

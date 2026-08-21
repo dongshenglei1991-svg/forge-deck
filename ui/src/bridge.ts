@@ -70,7 +70,7 @@ class MockBridge implements Bridge {
     { tool: { id: 't-manual', name: '自研脚本', type: 'cli', exePath: 'C:\\Tools\\mine.cmd', source: '手动添加', builtin: false, manual: true, pathPinned: false }, exists: true, defaultMode: 'embedded' },
   ];
   private readonly settings: SettingsInfo = {
-    settings: { defaultShell: 'pwsh', autoScanOnStartup: true, extraScanDirs: [], skipExitConfirm: false, preferEmbedded: true, maxWorkdirHistory: 20 },
+    settings: { defaultShell: 'pwsh', autoScanOnStartup: true, extraScanDirs: [], skipExitConfirm: false, preferEmbedded: true, maxWorkdirHistory: 20, closeBehavior: 'ask' },
     commonDirs: [
       { name: '主目录', path: 'C:\\Users\\dev' },
       { name: '桌面', path: 'C:\\Users\\dev\\Desktop' },
@@ -281,9 +281,19 @@ class MockBridge implements Bridge {
         return { pid: 4242 };
       case 'window.minimize':
       case 'window.toggleMaximize':
-      case 'window.close':
       case 'window.beginDrag':
         return null; // 浏览器预览无窗口控制，静默
+      case 'window.close': {
+        const behavior = this.settings.settings.closeBehavior;
+        if (behavior === 'ask') this.emit('window.close.prompt', {});
+        else if (behavior === 'minimizeToTray') this.emit('window.tray.mocked', {});
+        return null;
+      }
+      case 'window.hideToTray':
+        this.emit('window.tray.mocked', {});
+        return null;
+      case 'window.exit':
+        return null;
       case 'window.getState':
         return { maximized: false };
       case 'dialog.selectDirectory':

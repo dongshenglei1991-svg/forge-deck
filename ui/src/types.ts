@@ -36,6 +36,7 @@ export interface AppSettings {
   skipExitConfirm: boolean;
   preferEmbedded: boolean;
   maxWorkdirHistory: number;
+  closeBehavior: 'ask' | 'exit' | 'minimizeToTray';
 }
 
 export interface CommonDir { name: string; path: string }
