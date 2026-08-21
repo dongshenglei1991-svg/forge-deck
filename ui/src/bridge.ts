@@ -148,7 +148,7 @@ class MockBridge implements Bridge {
     'C:\\Projects\\atlas-web': [
       e('src', 'C:\\Projects\\atlas-web\\src', true, ''),
       e('node_modules', 'C:\\Projects\\atlas-web\\node_modules', true, ''),
-      e('go.mod', 'C:\\Projects\\atlas-web\\go.mod', false, ''),
+      e('go.mod', 'C:\\Projects\\atlas-web\\go.mod', false, 'mod'),
       e('pom.xml', 'C:\\Projects\\atlas-web\\pom.xml', false, 'xml'),
       e('Program.cs', 'C:\\Projects\\atlas-web\\Program.cs', false, 'cs'),
       e('package.json', 'C:\\Projects\\atlas-web\\package.json', false, 'json'),
@@ -163,7 +163,7 @@ class MockBridge implements Bridge {
       e('app.go', 'C:\\Projects\\atlas-web\\src\\app.go', false, 'go'),
     ],
     'C:\\Projects\\atlas-web\\node_modules': [
-      e('left-pad', 'C:\\Projects\\atlas-web\\node_modules\\left-pad', true, ''),
+      e('index.js', 'C:\\Projects\\atlas-web\\node_modules\\index.js', false, 'js'),
     ],
   };
 

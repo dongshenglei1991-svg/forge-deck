@@ -65,7 +65,7 @@
 }
 .file-tree-row.dir { cursor: pointer; }
 .file-tree-row:hover { background: var(--fg-soft); }
-.file-tree-item { overflow: hidden; text-overflow: ellipsis; }
+.file-tree-item { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .file-chevron { width: 10px; color: var(--muted); font-size: 10px; flex-shrink: 0; display: inline-block; }
 .file-chevron.open { transform: rotate(90deg); }
 .file-chevron.hidden { visibility: hidden; }

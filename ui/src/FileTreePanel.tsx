@@ -19,31 +19,39 @@ function isMissingError(msg: string) {
   return msg.includes('not_found') || msg.includes('目录不存在');
 }
 
+function keepLayerOnFail(cur: Layer | undefined) {
+  return cur?.kind === 'entries' || cur?.kind === 'empty';
+}
+
 export function FileTreePanel({ root, onError }: { root: string | null; onError: (msg: string) => void }) {
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [layers, setLayers] = useState<Map<string, Layer>>(() => new Map());
+  const loadGen = useRef(0);
 
   const load = useCallback(async (path: string, rootPath: string, keepOnFail: boolean) => {
+    const gen = loadGen.current;
     setLayers((prev) => {
       const cur = prev.get(path);
-      if (keepOnFail && cur?.kind === 'entries') return prev;
+      if (keepOnFail && keepLayerOnFail(cur)) return prev;
       const next = new Map(prev);
       next.set(path, { kind: 'loading' });
       return next;
     });
     try {
       const r = await bridge.request<FsListResult>('fs.list', { path, root: rootPath });
+      if (gen !== loadGen.current) return;
       setLayers((prev) => {
         const next = new Map(prev);
         next.set(path, r.entries.length === 0 ? { kind: 'empty' } : { kind: 'entries', items: r.entries });
         return next;
       });
     } catch (e: unknown) {
+      if (gen !== loadGen.current) return;
       const msg = e instanceof Error ? e.message : String(e);
       if (keepOnFail) onError(msg);
       setLayers((prev) => {
         const cur = prev.get(path);
-        if (keepOnFail && cur?.kind === 'entries') return prev;
+        if (keepOnFail && keepLayerOnFail(cur)) return prev;
         const next = new Map(prev);
         next.set(path, { kind: 'error', missing: isMissingError(msg) });
         return next;
@@ -55,6 +63,7 @@ export function FileTreePanel({ root, onError }: { root: string | null; onError:
 
   // 只在激活会话 workdir 变化时换根；onError/load 引用变化不得清空展开态
   useEffect(() => {
+    loadGen.current += 1;
     setExpanded(new Set());
     setLayers(new Map());
     if (root) void loadRef.current(root, root, false);
@@ -62,20 +71,18 @@ export function FileTreePanel({ root, onError }: { root: string | null; onError:
 
   const toggle = (entry: FsEntry) => {
     if (!root || !entry.isDirectory) return;
+    const willExpand = !expanded.has(entry.path);
     setExpanded((prev) => {
       const next = new Set(prev);
-      if (next.has(entry.path)) {
-        next.delete(entry.path);
-        return next;
-      }
-      next.add(entry.path);
+      if (next.has(entry.path)) next.delete(entry.path);
+      else next.add(entry.path);
       return next;
     });
-    setLayers((prev) => {
-      if (!root || prev.has(entry.path)) return prev;
-      void load(entry.path, root, false);
-      return prev;
-    });
+    if (!willExpand) return;
+    const cur = layers.get(entry.path);
+    // 已缓存成功或在途不重复请求；error / 未加载要重新 fs.list
+    if (cur?.kind === 'entries' || cur?.kind === 'loading') return;
+    void load(entry.path, root, false);
   };
 
   const refresh = () => {
@@ -109,9 +116,13 @@ function LayerView({ layer, depth, expanded, layers, onToggle }: {
   layer: Layer | undefined; depth: number; expanded: Set<string>;
   layers: Map<string, Layer>; onToggle: (e: FsEntry) => void;
 }) {
-  if (!layer || layer.kind === 'loading') return <div className="file-tree-msg">读取中…</div>;
-  if (layer.kind === 'empty') return <div className="file-tree-msg">空目录</div>;
-  if (layer.kind === 'error') return <div className="file-tree-msg">{layer.missing ? '目录不存在' : '无法读取'}</div>;
+  const pad = { paddingLeft: 8 + depth * 12 };
+  if (!layer || layer.kind === 'loading') return <div className="file-tree-msg" style={pad}>读取中…</div>;
+  if (layer.kind === 'empty') return <div className="file-tree-msg" style={pad}>空目录</div>;
+  if (layer.kind === 'error') {
+    const text = layer.missing && depth === 0 ? '目录不存在' : '无法读取';
+    return <div className="file-tree-msg" style={pad}>{text}</div>;
+  }
   return (
     <>
       {layer.items.map((entry) => (
