@@ -22,12 +22,28 @@ function ignoreSessionGone(e: unknown) {
   if (!msg.startsWith('session-gone')) console.error(e);
 }
 
-export function TerminalPanel({ sessions, activeId, visible, workdir, onError, onActivate, onNewSession, onCloseSession }: {
+// WebView2 首次布局时常是 0 高：FitAddon 读到 0/auto 会保持默认 24 行，选项卡下面只画出一小截。
+function fitSession(sessionId: string, term: Terminal, fit: FitAddon, container: HTMLElement) {
+  if (container.offsetParent === null) return;
+  if (container.clientWidth < 20 || container.clientHeight < 20) return;
+  try { fit.fit(); } catch { return; }
+  bridge.request('terminal.resize', { sessionId, cols: term.cols, rows: term.rows }).catch(ignoreSessionGone);
+}
+
+function scheduleFit(sessionId: string, term: Terminal, fit: FitAddon, container: HTMLElement) {
+  const run = () => fitSession(sessionId, term, fit, container);
+  run();
+  requestAnimationFrame(() => { run(); requestAnimationFrame(run); });
+  setTimeout(run, 50);
+}
+
+export function TerminalPanel({ sessions, activeId, visible, workdir, onError, onInfo, onActivate, onNewSession, onCloseSession }: {
   sessions: TerminalSessionInfo[];
   activeId: string | null;
   visible: boolean;
   workdir: string | null;
   onError: (msg: string) => void;
+  onInfo?: (msg: string) => void;
   onActivate: (id: string) => void;
   onNewSession: () => void;
   onCloseSession: (id: string) => void;
@@ -73,14 +89,9 @@ export function TerminalPanel({ sessions, activeId, visible, workdir, onError, o
       const fit = new FitAddon();
       term.loadAddon(fit);
       term.open(container);
-      try { fit.fit(); } catch { /* 容器尺寸为 0 时忽略 */ }
-      bridge.request('terminal.resize', { sessionId: id, cols: term.cols, rows: term.rows }).catch(ignoreSessionGone);
+      scheduleFit(id, term, fit, container);
       term.onData((data) => bridge.request('terminal.write', { sessionId: id, data }).catch(ignoreSessionGone));
-      const observer = new ResizeObserver(() => {
-        if (container.offsetParent === null) return;
-        try { fit.fit(); } catch { return; }
-        bridge.request('terminal.resize', { sessionId: id, cols: term.cols, rows: term.rows }).catch(ignoreSessionGone);
-      });
+      const observer = new ResizeObserver(() => fitSession(id, term, fit, container));
       observer.observe(container);
       const buffered = pendingChunks.current.get(id);
       if (buffered) {
@@ -93,19 +104,16 @@ export function TerminalPanel({ sessions, activeId, visible, workdir, onError, o
   }, [sessions]);
 
   useEffect(() => {
-    if (!visible) return;
-    const entry = activeId ? terms.current.get(activeId) : null;
-    if (!entry) return;
-    requestAnimationFrame(() => {
-      try { entry.fit.fit(); } catch { return; }
-      bridge.request('terminal.resize', { sessionId: activeId, cols: entry.term.cols, rows: entry.term.rows })
-        .catch(ignoreSessionGone);
-    });
+    if (!visible || !activeId) return;
+    const entry = terms.current.get(activeId);
+    const container = containers.current.get(activeId);
+    if (!entry || !container) return;
+    scheduleFit(activeId, entry.term, entry.fit, container);
   }, [visible, activeId, sessions]);
 
   return (
     <section className="terminal">
-      <FileTreePanel root={workdir} onError={onError} />
+      <FileTreePanel root={workdir} onError={onError} onInfo={onInfo} />
       <div className="term-main">
         <div className="term-tabs" id="termTabs">
           {sessions.map((s) => (
@@ -129,7 +137,7 @@ export function TerminalPanel({ sessions, activeId, visible, workdir, onError, o
         {sessions.map((s) => (
           <div key={s.sessionId}
             ref={(el) => { if (el) containers.current.set(s.sessionId, el); else containers.current.delete(s.sessionId); }}
-            className="term-body" style={{ display: s.sessionId === activeId ? 'block' : 'none' }} />
+            className="term-body" hidden={s.sessionId !== activeId} />
         ))}
       </div>
     </section>
