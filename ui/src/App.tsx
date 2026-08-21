@@ -334,6 +334,7 @@ export default function App() {
 
   const termStage = view === 'sessions';
   const selectedTool = tools.find((t) => t.tool.id === selectedToolId) ?? null;
+  const handleFileTreeError = useCallback((msg: string) => toast(msg, 'error'), [toast]);
 
   return (
     <div className={`app${termStage ? ' term-stage' : ''}`}>
@@ -373,7 +374,7 @@ export default function App() {
         <section className="view-panel" data-view-panel="sessions" hidden={view !== 'sessions'}>
           <TerminalPanel visible={termStage} sessions={sessions} activeId={activeSessionId}
             workdir={sessions.find((s) => s.sessionId === activeSessionId)?.workdir ?? null}
-            onError={(msg) => toast(msg, 'error')}
+            onError={handleFileTreeError}
             onActivate={setActiveSessionId} onNewSession={handleNewShell} onCloseSession={handleCloseSession} />
         </section>
         <section className="view-panel" data-view-panel="settings" hidden={view !== 'settings'}>

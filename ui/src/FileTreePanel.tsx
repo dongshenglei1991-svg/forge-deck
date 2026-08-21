@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { bridge } from './bridge';
 import { fileBadge } from './fileIcons';
 import type { FsEntry, FsListResult } from './types';
@@ -50,12 +50,15 @@ export function FileTreePanel({ root, onError }: { root: string | null; onError:
       });
     }
   }, [onError]);
+  const loadRef = useRef(load);
+  loadRef.current = load;
 
+  // 只在激活会话 workdir 变化时换根；onError/load 引用变化不得清空展开态
   useEffect(() => {
     setExpanded(new Set());
     setLayers(new Map());
-    if (root) void load(root, root, false);
-  }, [root, load]);
+    if (root) void loadRef.current(root, root, false);
+  }, [root]);
 
   const toggle = (entry: FsEntry) => {
     if (!root || !entry.isDirectory) return;
