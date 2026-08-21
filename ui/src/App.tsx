@@ -6,6 +6,7 @@ import { LauncherView } from './LauncherView';
 import { TerminalPanel } from './TerminalPanel';
 import { AddToolModal } from './AddToolModal';
 import { ClosePromptModal } from './ClosePromptModal';
+import { ConfirmModal } from './ConfirmModal';
 import { ConfigPanel } from './ConfigPanel';
 import { ToolsView } from './ToolsView';
 import { SettingsView } from './SettingsView';
@@ -30,6 +31,10 @@ export default function App() {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   const [closePromptOpen, setClosePromptOpen] = useState(false);
+  const [confirmDlg, setConfirmDlg] = useState<{
+    title: string; subtitle?: string; confirmLabel: string; danger?: boolean;
+    run: () => void | Promise<void>;
+  } | null>(null);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const toast = useCallback((text: string, kind: ToastItem['kind'] = 'info') => {
     const item: ToastItem = { id: Date.now() + Math.random(), text, kind };
@@ -202,16 +207,24 @@ export default function App() {
     }
   }, []);
 
-  const handleDeleteProfile = useCallback(async (id: string) => {
-    try {
-      const next = await bridge.request<LaunchProfile>('profiles.delete', { id });
-      setProfile(next);
-      setProfiles(await bridge.request<LaunchProfile[]>('profiles.list', { toolId: next.toolId }));
-      setRenameError(null);
-      toast('已删除配置');
-    } catch (e: any) {
-      toast(e.message, 'error');
-    }
+  const handleDeleteProfile = useCallback((id: string) => {
+    setConfirmDlg({
+      title: '删除此启动配置？',
+      subtitle: '此操作不可撤销。',
+      confirmLabel: '删除',
+      danger: true,
+      run: async () => {
+        try {
+          const next = await bridge.request<LaunchProfile>('profiles.delete', { id });
+          setProfile(next);
+          setProfiles(await bridge.request<LaunchProfile[]>('profiles.list', { toolId: next.toolId }));
+          setRenameError(null);
+          toast('已删除配置');
+        } catch (e: any) {
+          toast(e.message, 'error');
+        }
+      },
+    });
   }, [toast]);
 
   const handleHideTool = useCallback(async (toolId: string) => {
@@ -232,14 +245,21 @@ export default function App() {
     }
   }, [applyTools, toast]);
 
-  const handleDeleteTool = useCallback(async (toolId: string) => {
-    if (!confirm('删除该工具及其全部启动配置？此操作不可撤销。')) return;
-    try {
-      await applyTools(await bridge.request<ToolListItem[]>('tools.delete', { toolId }));
-      toast('已删除');
-    } catch (e: any) {
-      toast(e.message, 'error');
-    }
+  const handleDeleteTool = useCallback((toolId: string) => {
+    setConfirmDlg({
+      title: '删除该工具？',
+      subtitle: '将同时删除其全部启动配置，此操作不可撤销。',
+      confirmLabel: '删除',
+      danger: true,
+      run: async () => {
+        try {
+          await applyTools(await bridge.request<ToolListItem[]>('tools.delete', { toolId }));
+          toast('已删除');
+        } catch (e: any) {
+          toast(e.message, 'error');
+        }
+      },
+    });
   }, [applyTools, toast]);
 
   const handleRelocateTool = useCallback(async (toolId: string) => {
@@ -328,8 +348,21 @@ export default function App() {
 
   useEffect(() => {
     const offPrompt = bridge.on('window.close.prompt', () => setClosePromptOpen(true));
+    const offExit = bridge.on('window.exit.confirm', (d: { running?: number }) => {
+      const running = d?.running ?? 0;
+      setConfirmDlg({
+        title: '确定退出？',
+        subtitle: `有 ${running} 个会话正在运行，退出将结束它们。`,
+        confirmLabel: '退出',
+        danger: true,
+        run: async () => {
+          try { await bridge.request('window.confirmExit'); }
+          catch (e: any) { toast(e.message, 'error'); }
+        },
+      });
+    });
     const offTray = bridge.on('window.tray.mocked', () => toast('已最小化到托盘（仅桌面壳生效）'));
-    return () => { offPrompt(); offTray(); };
+    return () => { offPrompt(); offExit(); offTray(); };
   }, [toast]);
 
   const termStage = view === 'sessions';
@@ -387,6 +420,18 @@ export default function App() {
         onDismiss={() => setClosePromptOpen(false)}
         onMinimize={(remember) => void applyCloseChoice('tray', remember)}
         onExit={(remember) => void applyCloseChoice('exit', remember)} />
+      <ConfirmModal
+        open={confirmDlg != null}
+        title={confirmDlg?.title ?? ''}
+        subtitle={confirmDlg?.subtitle}
+        confirmLabel={confirmDlg?.confirmLabel}
+        danger={confirmDlg?.danger}
+        onCancel={() => setConfirmDlg(null)}
+        onConfirm={() => {
+          const run = confirmDlg?.run;
+          setConfirmDlg(null);
+          if (run) void run();
+        }} />
       <Toast items={toasts} />
     </div>
   );

@@ -25,14 +25,17 @@ internal sealed class TrayIconHost : IDisposable
                 Icon = TryLoadIcon() ?? SystemIcons.Application,
                 Visible = true,
             };
-            var menu = new WinForms.ContextMenuStrip();
-            menu.Items.Add("显示主窗口", null, (_, _) => RestoreRequested?.Invoke());
-            menu.Items.Add("退出", null, (_, _) => ExitRequested?.Invoke());
-            notify.ContextMenuStrip = menu;
             notify.MouseClick += (_, e) =>
             {
                 if (e.Button == WinForms.MouseButtons.Left)
                     RestoreRequested?.Invoke();
+            };
+            notify.MouseUp += (_, e) =>
+            {
+                if (e.Button == WinForms.MouseButtons.Right)
+                    TrayMenuWindow.ShowAtCursor(
+                        () => RestoreRequested?.Invoke(),
+                        () => ExitRequested?.Invoke());
             };
             _icon = notify;
             if (!_balloonShown)

@@ -48,15 +48,16 @@ public partial class App : Application
             : "发生未处理的异常，已拦截以避免闪退，可继续使用。";
         try
         {
-            MessageBox.Show(
-                $"{head}\n\n{ex.GetType().Name}: {ex.Message}\n\n详细信息已记录到：\n{CrashLog}",
-                "ForgeDeck", MessageBoxButton.OK, MessageBoxImage.Error);
+            AppPrompt.Alert(Current?.MainWindow,
+                "ForgeDeck",
+                $"{head}\n\n{ex.GetType().Name}: {ex.Message}\n\n详细信息已记录到：\n{CrashLog}");
         }
         catch (InvalidOperationException) { } // 关窗期间不能再弹窗
     }
 
     protected override void OnStartup(StartupEventArgs e)
     {
+        System.Windows.Forms.Application.EnableVisualStyles();
         _mutex = new Mutex(true, MutexName, out var created);
         if (!created)
         {

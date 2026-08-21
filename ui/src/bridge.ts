@@ -331,7 +331,13 @@ class MockBridge implements Bridge {
       case 'window.hideToTray':
         this.emit('window.tray.mocked', {});
         return null;
-      case 'window.exit':
+      case 'window.exit': {
+        const running = this.sessions.filter((s) => s.running).length;
+        if (running > 0 && !this.settings.settings.skipExitConfirm)
+          this.emit('window.exit.confirm', { running });
+        return null;
+      }
+      case 'window.confirmExit':
         return null;
       case 'window.getState':
         return { maximized: false };

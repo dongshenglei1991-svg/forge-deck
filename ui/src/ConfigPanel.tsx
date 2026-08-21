@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Switch } from './Switch';
+import { MenuSelect } from './MenuSelect';
 import { WorkdirControl } from './WorkdirControl';
 import { parseEnvText, stringifyEnv } from './lib/env';
 import type { LaunchProfile, OpenMode, ToolListItem } from './types';
@@ -82,10 +83,9 @@ export function ConfigPanel({ tool, profile, profiles, workdirs, onSave, onLaunc
               if (e.key === 'Escape') setRenaming(false);
             }} />
         ) : (
-          <select className="input" aria-label="启动配置" value={profile.id}
-            onChange={(e) => { void onSwitchProfile(current(), e.target.value); }}>
-            {profiles.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-          </select>
+          <MenuSelect ariaLabel="启动配置" value={profile.id}
+            options={profiles.map((p) => ({ value: p.id, label: p.name }))}
+            onChange={(id) => { void onSwitchProfile(current(), id); }} />
         )}
         {renaming ? (
           <button className="btn small" type="button" onClick={() => void commitRename()}>确定</button>
@@ -94,7 +94,7 @@ export function ConfigPanel({ tool, profile, profiles, workdirs, onSave, onLaunc
         )}
         <button className="btn small" type="button" title="复制当前配置" onClick={() => void onCreateProfile(current())}>新建</button>
         <button className="btn small" type="button" title="删除此配置"
-          onClick={() => { if (confirm('删除此启动配置？')) void onDeleteProfile(profile.id); }}>删除</button>
+          onClick={() => { void onDeleteProfile(profile.id); }}>删除</button>
       </div>
       {renameError && <p className="field-error">{renameError}</p>}
       <div className="config">

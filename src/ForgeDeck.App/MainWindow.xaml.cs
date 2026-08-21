@@ -80,6 +80,13 @@ public partial class MainWindow : Window
             Close();
             return Task.FromResult<object?>(null);
         });
+        d.Register("window.confirmExit", _ =>
+        {
+            _confirmedExit = true;
+            _forceExit = true;
+            Close();
+            return Task.FromResult<object?>(null);
+        });
         d.Register("window.beginDrag", _ =>
         {
             BeginDrag();
@@ -176,9 +183,9 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            MessageBox.Show(
-                $"WebView2 初始化失败：{ex.Message}\n请确认已安装 WebView2 运行时。",
-                "ForgeDeck", MessageBoxButton.OK, MessageBoxImage.Error);
+            AppPrompt.Alert(this,
+                "无法启动",
+                $"WebView2 初始化失败：{ex.Message}\n请确认已安装 WebView2 运行时。");
             Close();
         }
     }
@@ -187,9 +194,9 @@ public partial class MainWindow : Window
     {
         if (!e.IsSuccess || Web.CoreWebView2 == null)
         {
-            MessageBox.Show(
-                $"WebView2 初始化失败：{e.InitializationException?.Message ?? "未知原因"}\n请确认已安装 WebView2 运行时。",
-                "ForgeDeck", MessageBoxButton.OK, MessageBoxImage.Error);
+            AppPrompt.Alert(this,
+                "无法启动",
+                $"WebView2 初始化失败：{e.InitializationException?.Message ?? "未知原因"}\n请确认已安装 WebView2 运行时。");
             Close();
             return;
         }
@@ -325,15 +332,16 @@ public partial class MainWindow : Window
                 _bridge.Dispatcher.Emit("window.close.prompt", new { });
             else
             {
-                var fallback = MessageBox.Show(
-                    "关闭窗口？选「是」退出，选「否」最小化到托盘。", "ForgeDeck",
-                    MessageBoxButton.YesNo, MessageBoxImage.Question);
-                if (fallback == MessageBoxResult.Yes)
+                var fallback = AppPrompt.Ask(this,
+                    "关闭 ForgeDeck？",
+                    "可以把窗口藏到托盘，会话继续跑。",
+                    "退出应用", "最小化到托盘");
+                if (fallback == PromptChoice.Primary) HideToTray();
+                else if (fallback == PromptChoice.Secondary)
                 {
                     _forceExit = true;
                     Dispatcher.BeginInvoke(Close);
                 }
-                else HideToTray();
             }
             return;
         }
@@ -350,20 +358,20 @@ public partial class MainWindow : Window
             _terminal.Dispose();
             return;
         }
+        e.Cancel = true;
+        _forceExit = false;
         var running = _terminal.List().Count(s => s.Running);
-        var choice = MessageBox.Show(
-            $"有 {running} 个会话正在运行，退出将结束它们。确定退出吗？", "ForgeDeck",
-            MessageBoxButton.YesNo, MessageBoxImage.Warning);
-        if (choice != MessageBoxResult.Yes)
+        if (Web.CoreWebView2 != null)
         {
-            e.Cancel = true;
-            _forceExit = false;
+            _bridge.Dispatcher.Emit("window.exit.confirm", new { running });
             return;
         }
-        // 已在 Closing 里：只能放行当前关闭，禁止再调 Close()（会抛 InvalidOperationException）
+        if (!AppPrompt.Confirm(this, "确定退出？",
+            $"有 {running} 个会话正在运行，退出将结束它们。", "退出", "取消"))
+            return;
         _confirmedExit = true;
-        _tray.Dispose();
-        _terminal.Dispose();
+        _forceExit = true;
+        Dispatcher.BeginInvoke(Close);
     }
 
     private void HideToTray()
@@ -374,9 +382,8 @@ public partial class MainWindow : Window
         Hide();
         if (!_tray.Show())
         {
-            MessageBox.Show(
-                "无法创建托盘图标，窗口已隐藏。再次启动 ForgeDeck 可恢复窗口。",
-                "ForgeDeck", MessageBoxButton.OK, MessageBoxImage.Warning);
+            AppPrompt.Alert(this, "无法创建托盘图标",
+                "窗口已隐藏。再次启动 ForgeDeck 可恢复窗口。");
         }
     }
 
@@ -393,6 +400,7 @@ public partial class MainWindow : Window
 
     private void ExitFromTray()
     {
+        RestoreFromTray();
         _forceExit = true;
         Close();
     }
