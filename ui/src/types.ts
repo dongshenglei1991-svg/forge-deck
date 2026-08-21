@@ -68,3 +68,15 @@ export interface AppInfo {
   lastScanAt: string | null;
   lastUsed: { toolId: string; workdir: string } | null;
 }
+
+export interface FsEntry {
+  name: string;
+  path: string;
+  isDirectory: boolean;
+  extension: string;
+}
+
+export interface FsListResult {
+  path: string;
+  entries: FsEntry[];
+}

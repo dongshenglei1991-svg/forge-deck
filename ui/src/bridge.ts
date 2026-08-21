@@ -1,4 +1,8 @@
-import type { AppInfo, HiddenTool, LaunchProfile, SettingsInfo, TerminalSessionInfo, ToolListItem } from './types';
+import type { AppInfo, FsEntry, FsListResult, HiddenTool, LaunchProfile, SettingsInfo, TerminalSessionInfo, ToolListItem } from './types';
+
+function e(name: string, path: string, isDirectory: boolean, extension: string): FsEntry {
+  return { name, path, isDirectory, extension };
+}
 
 export interface Bridge {
   request<T = unknown>(method: string, params?: unknown): Promise<T>;
@@ -140,6 +144,29 @@ class MockBridge implements Bridge {
     return fresh;
   }
 
+  private static readonly mockTree: Record<string, FsEntry[]> = {
+    'C:\\Projects\\atlas-web': [
+      e('src', 'C:\\Projects\\atlas-web\\src', true, ''),
+      e('node_modules', 'C:\\Projects\\atlas-web\\node_modules', true, ''),
+      e('go.mod', 'C:\\Projects\\atlas-web\\go.mod', false, ''),
+      e('pom.xml', 'C:\\Projects\\atlas-web\\pom.xml', false, 'xml'),
+      e('Program.cs', 'C:\\Projects\\atlas-web\\Program.cs', false, 'cs'),
+      e('package.json', 'C:\\Projects\\atlas-web\\package.json', false, 'json'),
+      e('README.md', 'C:\\Projects\\atlas-web\\README.md', false, 'md'),
+      e('.gitignore', 'C:\\Projects\\atlas-web\\.gitignore', false, ''),
+    ],
+    'C:\\Projects\\atlas-web\\src': [
+      e('App.tsx', 'C:\\Projects\\atlas-web\\src\\App.tsx', false, 'tsx'),
+      e('main.ts', 'C:\\Projects\\atlas-web\\src\\main.ts', false, 'ts'),
+      e('app.css', 'C:\\Projects\\atlas-web\\src\\app.css', false, 'css'),
+      e('Main.java', 'C:\\Projects\\atlas-web\\src\\Main.java', false, 'java'),
+      e('app.go', 'C:\\Projects\\atlas-web\\src\\app.go', false, 'go'),
+    ],
+    'C:\\Projects\\atlas-web\\node_modules': [
+      e('left-pad', 'C:\\Projects\\atlas-web\\node_modules\\left-pad', true, ''),
+    ],
+  };
+
   private handle(method: string, p: any): any {
     switch (method) {
       case 'app.info':
@@ -255,6 +282,18 @@ class MockBridge implements Bridge {
       case 'workdirs.remove':
         this.workdirs.splice(this.workdirs.indexOf(p.path), 1);
         return this.workdirs;
+      case 'fs.list': {
+        const root = String(p?.root ?? '');
+        const path = String(p?.path ?? '');
+        if (!root.trim() || !path.trim()) throw new Error('validation: 路径不能为空');
+        const prefix = root.endsWith('\\') ? root : root + '\\';
+        const under = path.toLowerCase() === root.toLowerCase()
+          || path.toLowerCase().startsWith(prefix.toLowerCase());
+        if (!under) throw new Error('validation: 路径超出工作目录');
+        const entries = MockBridge.mockTree[path];
+        if (!entries) throw new Error('not_found: 目录不存在');
+        return { path, entries } satisfies FsListResult;
+      }
       case 'sessions.list':
         return [...this.sessions]; // 真实桥每次返回新 JSON 数组；副本保证 React 依赖比较生效
       case 'terminal.create':
