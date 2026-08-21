@@ -18,7 +18,10 @@ public partial class MainWindow : Window
     private readonly ConfigStore _store = new();
     private readonly TerminalSessionManager _terminal = new();
     private readonly ForgeDeckBridge _bridge;
+    private readonly TrayIconHost _tray = new();
     private bool _confirmedExit;
+    private bool _forceExit;
+    private WindowState _trayRestoreState = WindowState.Normal;
 
     public MainWindow()
     {
@@ -41,6 +44,10 @@ public partial class MainWindow : Window
         Web.CoreWebView2InitializationCompleted += OnWebReady;
         Loaded += OnWindowLoaded;
         Closing += OnClosing;
+        if (System.Windows.Application.Current != null)
+            System.Windows.Application.Current.SessionEnding += (_, _) => _forceExit = true;
+        _tray.RestoreRequested += RestoreFromTray;
+        _tray.ExitRequested += ExitFromTray;
     }
 
     /// <summary>窗口操作与系统对话框属 UI 能力，在 App 层注册（Core 不依赖 WPF）。</summary>
@@ -59,6 +66,17 @@ public partial class MainWindow : Window
         });
         d.Register("window.close", _ =>
         {
+            Close();
+            return Task.FromResult<object?>(null);
+        });
+        d.Register("window.hideToTray", _ =>
+        {
+            HideToTray();
+            return Task.FromResult<object?>(null);
+        });
+        d.Register("window.exit", _ =>
+        {
+            _forceExit = true;
             Close();
             return Task.FromResult<object?>(null);
         });
@@ -130,6 +148,10 @@ public partial class MainWindow : Window
         if (msg == Win32.WM_GETMINMAXINFO)
         {
             handled = Win32.TryApplyWorkArea(hwnd, lParam);
+        }
+        else if (msg == Win32.WM_QUERYENDSESSION)
+        {
+            _forceExit = true;
         }
         return IntPtr.Zero;
     }
@@ -220,6 +242,7 @@ public partial class MainWindow : Window
         internal const int VK_LBUTTON = 0x01;
         internal const int WM_NCLBUTTONDOWN = 0x00A1;
         internal const int WM_GETMINMAXINFO = 0x0024;
+        internal const int WM_QUERYENDSESSION = 0x0011;
         internal const int HTCAPTION = 0x2;
         private const uint MonitorDefaultToNearest = 2;
 
@@ -294,8 +317,36 @@ public partial class MainWindow : Window
 
     private void OnClosing(object? sender, CancelEventArgs e)
     {
+        var action = CloseDecision.Resolve(_store.Config.Settings.CloseBehavior, _forceExit);
+        if (action == CloseAction.Ask)
+        {
+            e.Cancel = true;
+            if (Web.CoreWebView2 != null)
+                _bridge.Dispatcher.Emit("window.close.prompt", new { });
+            else
+            {
+                var fallback = MessageBox.Show(
+                    "关闭窗口？选「是」退出，选「否」最小化到托盘。", "ForgeDeck",
+                    MessageBoxButton.YesNo, MessageBoxImage.Question);
+                if (fallback == MessageBoxResult.Yes)
+                {
+                    _forceExit = true;
+                    Dispatcher.BeginInvoke(Close);
+                }
+                else HideToTray();
+            }
+            return;
+        }
+        if (action == CloseAction.HideToTray)
+        {
+            e.Cancel = true;
+            HideToTray();
+            return;
+        }
+
         if (_confirmedExit || !_terminal.HasRunningSessions || _store.Config.Settings.SkipExitConfirm)
         {
+            _tray.Dispose();
             _terminal.Dispose();
             return;
         }
@@ -306,10 +357,43 @@ public partial class MainWindow : Window
         if (choice != MessageBoxResult.Yes)
         {
             e.Cancel = true;
+            _forceExit = false;
             return;
         }
         // 已在 Closing 里：只能放行当前关闭，禁止再调 Close()（会抛 InvalidOperationException）
         _confirmedExit = true;
+        _tray.Dispose();
         _terminal.Dispose();
+    }
+
+    private void HideToTray()
+    {
+        if (_tray.Visible) return;
+        _trayRestoreState = WindowState == WindowState.Maximized ? WindowState.Maximized : WindowState.Normal;
+        ShowInTaskbar = false;
+        Hide();
+        if (!_tray.Show())
+        {
+            MessageBox.Show(
+                "无法创建托盘图标，窗口已隐藏。再次启动 ForgeDeck 可恢复窗口。",
+                "ForgeDeck", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    public void RestoreFromTray()
+    {
+        ShowInTaskbar = true;
+        Show();
+        WindowState = _trayRestoreState;
+        Activate();
+        Topmost = true;
+        Topmost = false;
+        _tray.Hide();
+    }
+
+    private void ExitFromTray()
+    {
+        _forceExit = true;
+        Close();
     }
 }
