@@ -6,13 +6,16 @@
         Title="ForgeDeck" Width="1280" Height="800"
         MinWidth="800" MinHeight="520"
         WindowStartupLocation="CenterScreen"
-        WindowStyle="None" ResizeMode="CanResize">
+        WindowStyle="None" ResizeMode="CanResize"
+        Background="#061510">
     <WindowChrome.WindowChrome>
         <!-- 无系统标题栏：CaptionHeight=0 隐藏字幕区，保留 8px 隐形调整边框 -->
         <shell:WindowChrome CaptionHeight="0" GlassFrameThickness="0" CornerRadius="0"
                             UseAeroCaptionButtons="False" ResizeBorderThickness="8"/>
     </WindowChrome.WindowChrome>
-    <Grid x:Name="Root">
+    <!-- 背景色与 app.css 的 bg 令牌（ForgeDeckTheme.Bg）对齐：缩放动画每帧新露出的
+         窄条先由这层和 WebView2 的 DefaultBackgroundColor 填，色差会被看成闪一下 -->
+    <Grid x:Name="Root" Background="#061510">
         <wv2:WebView2 x:Name="Web" />
     </Grid>
 </Window>
