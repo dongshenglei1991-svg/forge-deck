@@ -192,7 +192,38 @@ public class ToolScannerTests : IDisposable
         { "cn.exe", "Continue CLI", "--resume" },
         { "kiro-cli.exe", "Kiro CLI", null },
         { "iflow.exe", "iFlow CLI", null },
+        { "droid.exe", "Factory Droid", null },
+        { "cline.exe", "Cline", null },
+        { "kimi.exe", "Kimi Code", null },
+        { "lingma.exe", "Lingma", null },
+        { "codebuddy.exe", "CodeBuddy", null },
+        { "auggie.exe", "Augment", null },
+        { "qoder.exe", "Qoder", null },
+        { "minimax.exe", "MiniMax", null },
+        { "ollama.exe", "Ollama", null },
     };
+
+    public static TheoryData<string, string> GuiCatalog => new()
+    {
+        { "Warp.exe", "Warp" },
+        { "ChatGPT.exe", "ChatGPT" },
+        { "LM Studio.exe", "LM Studio" },
+    };
+
+    [Theory]
+    [MemberData(nameof(GuiCatalog))]
+    public void Catalog_IncludesGuiTools(string exe, string name)
+    {
+        var byExe = KnownTools.MatchByExeName(exe);
+        Assert.NotNull(byExe);
+        Assert.Equal(name, byExe.Name);
+        Assert.Equal(ToolType.Gui, byExe.Type);
+        Assert.NotEmpty(byExe.Hints);
+
+        var byName = KnownTools.MatchByName(name);
+        Assert.NotNull(byName);
+        Assert.Equal(name, byName.Name);
+    }
 
     [Theory]
     [MemberData(nameof(MainstreamCliCatalog))]
