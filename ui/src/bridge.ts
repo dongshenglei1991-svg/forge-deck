@@ -1,4 +1,4 @@
-import type { AppInfo, FsEntry, FsListResult, FsReadImageResult, FsReadResult, HiddenTool, LaunchProfile, SettingsInfo, TerminalSessionInfo, ToolListItem } from './types';
+import type { AppInfo, FsEntry, FsListResult, FsReadImageResult, FsReadResult, FsWriteResult, HiddenTool, LaunchProfile, SettingsInfo, TerminalSessionInfo, ToolListItem } from './types';
 
 function e(name: string, path: string, isDirectory: boolean, extension: string): FsEntry {
   return { name, path, isDirectory, extension };
@@ -322,6 +322,19 @@ class MockBridge implements Bridge {
         const content = this.mockFileContent(path);
         return { content, encoding: 'utf-8', size: content.length } satisfies FsReadResult;
       }
+      case 'fs.write': {
+        const { path } = this.guardFs(p);
+        const kind = this.mockKind(path);
+        if (kind === 'dir') throw new Error('validation: 只能写入文件');
+        if (kind === 'missing') throw new Error('not_found: 文件不存在');
+        if (typeof p.content !== 'string') throw new Error('validation: 内容必须是字符串');
+        const enc = String(p.encoding ?? 'utf-8').trim().toLowerCase() || 'utf-8';
+        if (!['utf-8', 'utf-8bom', 'utf-16le', 'utf-16be', 'gbk'].includes(enc))
+          throw new Error('validation: 不支持的编码');
+        if (p.content.length > 1024 * 1024) throw new Error('validation: 文件超过 1MB，请使用系统默认方式打开');
+        this.mockFiles[path.toLowerCase()] = p.content;
+        return { size: p.content.length } satisfies FsWriteResult;
+      }
       case 'fs.list': {
         const { path } = this.guardFs(p);
         const entries = this.mockTree[path];
@@ -453,8 +466,8 @@ class MockBridge implements Bridge {
       '',
       '## 说明',
       '',
-      '- 双击文件树中的文件即可打开文本查看器',
-      '- 查看器为只读，带行号与语法高亮',
+      '- 双击文件树中的文件即可打开文本编辑器',
+      '- 编辑后 Ctrl+S 或点保存写回磁盘，带行号与语法高亮',
       '',
     ].join('\n'),
     'c:\\projects\\atlas-web\\package.json': JSON.stringify({

@@ -93,6 +93,10 @@ export interface FsReadResult {
   size: number;
 }
 
+export interface FsWriteResult {
+  size: number;
+}
+
 export interface FsReadImageResult {
   data: string;
   mime: string;

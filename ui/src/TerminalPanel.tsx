@@ -6,6 +6,7 @@ import { bridge } from './bridge';
 import { FileTreePanel } from './FileTreePanel';
 import { FileViewerPanel, type ViewerTab } from './FileViewerPanel';
 import { ImageViewerPanel } from './ImageViewerPanel';
+import { ConfirmModal } from './ConfirmModal';
 import { fileBadge } from './fileIcons';
 import { readXtermTheme } from './appearance';
 import type { AccentColor, ResolvedColorMode, TerminalSessionInfo } from './types';
@@ -78,6 +79,8 @@ export function TerminalPanel({ sessions, activeId, visible, workdir, colorMode,
   // null 表示回到当前激活的会话 tab
   const [fileTabs, setFileTabs] = useState<FileTab[]>([]);
   const [activeFilePath, setActiveFilePath] = useState<string | null>(null);
+  const [dirtyFiles, setDirtyFiles] = useState<Set<string>>(() => new Set());
+  const [pendingClose, setPendingClose] = useState<string | null>(null);
 
   const openFile = (path: string) => {
     if (!workdir) return;
@@ -91,6 +94,28 @@ export function TerminalPanel({ sessions, activeId, visible, workdir, colorMode,
     const key = fileKey(path);
     setFileTabs((prev) => prev.filter((t) => fileKey(t.path) !== key));
     setActiveFilePath((cur) => (cur != null && fileKey(cur) === key) ? null : cur);
+    setDirtyFiles((prev) => {
+      if (!prev.has(key)) return prev;
+      const next = new Set(prev);
+      next.delete(key);
+      return next;
+    });
+  };
+
+  const requestCloseFile = (path: string) => {
+    if (dirtyFiles.has(fileKey(path))) setPendingClose(path);
+    else closeFileTab(path);
+  };
+
+  const onDirtyChange = (path: string, dirty: boolean) => {
+    const key = fileKey(path);
+    setDirtyFiles((prev) => {
+      if (prev.has(key) === dirty) return prev;
+      const next = new Set(prev);
+      if (dirty) next.add(key);
+      else next.delete(key);
+      return next;
+    });
   };
 
   // 当前激活的文件 tab（决定哪个查看器在前台）
@@ -185,8 +210,9 @@ export function TerminalPanel({ sessions, activeId, visible, workdir, colorMode,
                   <span className="file-badge" style={{ background: badge.bg, color: badge.fg }}>{badge.label}</span>
                 )}
                 <span className="term-tab-label">{name}</span>
+                {dirtyFiles.has(fileKey(t.path)) && <span className="dirty-dot" title="未保存" />}
                 <span className="close" role="button" aria-label="关闭文件"
-                  onClick={(e) => { e.stopPropagation(); closeFileTab(t.path); }}>×</span>
+                  onClick={(e) => { e.stopPropagation(); requestCloseFile(t.path); }}>×</span>
               </button>
             );
           })}
@@ -211,7 +237,8 @@ export function TerminalPanel({ sessions, activeId, visible, workdir, colorMode,
               tabs={fileTabs.filter((t) => t.kind === 'text')}
               activePath={activeTab?.kind === 'text' ? activeFilePath : null}
               colorMode={colorMode}
-              onClose={closeFileTab}
+              onClose={requestCloseFile}
+              onDirtyChange={onDirtyChange}
             />
             <ImageViewerPanel
               tabs={fileTabs.filter((t) => t.kind === 'image')}
@@ -221,6 +248,18 @@ export function TerminalPanel({ sessions, activeId, visible, workdir, colorMode,
           </>
         )}
       </div>
+      <ConfirmModal
+        open={pendingClose != null}
+        title="未保存的更改"
+        subtitle={pendingClose ? `${fileName(pendingClose)} 有未保存的更改，关闭将丢失。` : undefined}
+        confirmLabel="放弃更改"
+        danger
+        onCancel={() => setPendingClose(null)}
+        onConfirm={() => {
+          if (pendingClose) closeFileTab(pendingClose);
+          setPendingClose(null);
+        }}
+      />
     </section>
   );
 }

@@ -3,9 +3,9 @@ import { bridge } from './bridge';
 import { monacoThemeName } from './appearance';
 import { languageForPath, monaco } from './monacoSetup';
 import type { ResolvedColorMode } from './types';
-import type { FsReadResult } from './types';
+import type { FsReadResult, FsWriteResult } from './types';
 
-/** 一个已打开的文件 tab：path 是显示与去重键，root 是打开时的工作目录（fs.read 的路径守卫用） */
+/** 一个已打开的文件 tab：path 是显示与去重键，root 是打开时的工作目录（fs.read / fs.write 的路径守卫用） */
 export interface ViewerTab {
   path: string;
   root: string;
@@ -25,38 +25,81 @@ function displayError(e: unknown) {
   return msg.replace(/^(validation|not_found|io|internal):\s*/, '');
 }
 
+function encodingLabel(enc: string) {
+  switch (enc) {
+    case 'utf-8': return 'UTF-8';
+    case 'utf-8bom': return 'UTF-8 BOM';
+    case 'utf-16le': return 'UTF-16 LE';
+    case 'utf-16be': return 'UTF-16 BE';
+    case 'gbk': return 'GBK';
+    default: return enc.toUpperCase();
+  }
+}
+
 /**
- * 文本查看器：单个 Monaco 编辑器实例 + 每文件一个 Model（切 tab 只换 model，不开新实例）。
- * 读取失败（超 1MB / 二进制 / 文件被删）在 tab 内联展示错误与重试，不弹 toast 打扰终端。
+ * 文本编辑器：单个 Monaco 实例 + 每文件一个 Model（切 tab 只换 model）。
+ * 读取失败在 tab 内联展示错误与重试；保存失败写在底栏，不盖住编辑区。
  */
-export function FileViewerPanel({ tabs, activePath, colorMode, onClose }: {
+export function FileViewerPanel({ tabs, activePath, colorMode, onClose, onDirtyChange }: {
   tabs: ViewerTab[];
   activePath: string | null;
   colorMode: ResolvedColorMode;
   onClose: (path: string) => void;
+  onDirtyChange?: (path: string, dirty: boolean) => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
   const colorModeRef = useRef(colorMode);
   colorModeRef.current = colorMode;
   const modelsRef = useRef(new Map<string, monaco.editor.ITextModel>());
+  const encodingsRef = useRef(new Map<string, string>());
+  const savedVersionRef = useRef(new Map<string, number>());
   const inflight = useRef(new Set<string>());
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
+  const activePathRef = useRef(activePath);
+  activePathRef.current = activePath;
+  const onDirtyChangeRef = useRef(onDirtyChange);
+  onDirtyChangeRef.current = onDirtyChange;
 
   const [states, setStates] = useState<Map<string, TabState>>(() => new Map());
   const [retries, setRetries] = useState(0);
+  const [dirty, setDirty] = useState<Set<string>>(() => new Set());
+  const dirtyRef = useRef(dirty);
+  dirtyRef.current = dirty;
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  const markDirty = useCallback((path: string, isDirty: boolean) => {
+    const key = tabKey(path);
+    setDirty((prev) => {
+      if (prev.has(key) === isDirty) return prev;
+      const next = new Set(prev);
+      if (isDirty) next.add(key);
+      else next.delete(key);
+      return next;
+    });
+    onDirtyChangeRef.current?.(path, isDirty);
+  }, []);
+
+  const bindModel = useCallback((path: string, model: monaco.editor.ITextModel) => {
+    savedVersionRef.current.set(tabKey(path), model.getAlternativeVersionId());
+    model.onDidChangeContent(() => {
+      const key = tabKey(path);
+      const saved = savedVersionRef.current.get(key);
+      markDirty(path, saved == null || model.getAlternativeVersionId() !== saved);
+    });
+  }, [markDirty]);
 
   useEffect(() => {
     if (!hostRef.current) return;
     const editor = monaco.editor.create(hostRef.current, {
       theme: monacoThemeName(colorModeRef.current),
-      readOnly: true,
+      readOnly: false,
       minimap: { enabled: false },
-      automaticLayout: true, // 内建 ResizeObserver：窗口缩放 / 分栏变化自动重排
+      automaticLayout: true,
       fontSize: 13,
       lineHeight: 20,
-      // 与 xterm 一致：西文走 Cascadia/Consolas，缺字形回退微软雅黑
       fontFamily: getComputedStyle(document.documentElement).getPropertyValue('--font-mono').trim() || undefined,
       scrollBeyondLastLine: false,
       wordWrap: 'off',
@@ -70,7 +113,7 @@ export function FileViewerPanel({ tabs, activePath, colorMode, onClose }: {
       editor.dispose();
       editorRef.current = null;
     };
-  }, []); // 主题切换走 setTheme，不重建实例
+  }, []);
 
   useEffect(() => {
     monaco.editor.setTheme(monacoThemeName(colorMode));
@@ -87,12 +130,19 @@ export function FileViewerPanel({ tabs, activePath, colorMode, onClose }: {
     });
     try {
       const r = await bridge.request<FsReadResult>('fs.read', { path: tab.path, root: tab.root });
-      // 等待期间 tab 可能已关闭，丢弃结果（model 不创建即无泄漏）
       if (!tabsRef.current.some((t) => tabKey(t.path) === key)) return;
       const uri = monaco.Uri.file(tab.path);
-      // tab 关闭后立即重开同一路径时 model 可能尚存：复用而不是重复创建（重复 uri 会抛错）
-      const model = monaco.editor.getModel(uri) ?? monaco.editor.createModel(r.content, languageForPath(tab.path), uri);
+      const existing = monaco.editor.getModel(uri);
+      const model = existing ?? monaco.editor.createModel(r.content, languageForPath(tab.path), uri);
+      encodingsRef.current.set(key, r.encoding);
       modelsRef.current.set(key, model);
+      if (!existing) {
+        // setEOL 可能改 versionId，必须在记下“已保存版本”之前
+        model.setEOL(r.content.includes('\r\n')
+          ? monaco.editor.EndOfLineSequence.CRLF
+          : monaco.editor.EndOfLineSequence.LF);
+        bindModel(tab.path, model);
+      }
       setStates((prev) => {
         const next = new Map(prev);
         next.set(key, { kind: 'ready' });
@@ -108,9 +158,8 @@ export function FileViewerPanel({ tabs, activePath, colorMode, onClose }: {
     } finally {
       inflight.current.delete(key);
     }
-  }, []);
+  }, [bindModel]);
 
-  // 新 tab 触发读取；已关闭 tab 释放 model（retries 变化 = 当前 tab 请求重试）
   useEffect(() => {
     const alive = new Set(tabs.map((t) => tabKey(t.path)));
     for (const [key, model] of modelsRef.current) {
@@ -118,23 +167,90 @@ export function FileViewerPanel({ tabs, activePath, colorMode, onClose }: {
       if (editorRef.current?.getModel() === model) editorRef.current.setModel(null);
       model.dispose();
       modelsRef.current.delete(key);
+      encodingsRef.current.delete(key);
+      savedVersionRef.current.delete(key);
     }
+    setDirty((prev) => {
+      let changed = false;
+      const next = new Set(prev);
+      for (const key of prev) {
+        if (alive.has(key)) continue;
+        next.delete(key);
+        changed = true;
+      }
+      return changed ? next : prev;
+    });
     for (const tab of tabs) void load(tab);
   }, [tabs, retries, load]);
 
-  // 激活 tab 变化（或 model 读取完成）时挂上对应 model
   useEffect(() => {
     const editor = editorRef.current;
     if (!editor) return;
     const model = activePath ? modelsRef.current.get(tabKey(activePath)) ?? null : null;
     if (editor.getModel() !== model) editor.setModel(model);
+    if (activePath) setSaveError(null);
   }, [activePath, states]);
 
-  const activeState = activePath ? states.get(tabKey(activePath)) : undefined;
+  const save = useCallback(async () => {
+    const path = activePathRef.current;
+    if (!path) return;
+    const key = tabKey(path);
+    const tab = tabsRef.current.find((t) => tabKey(t.path) === key);
+    const model = modelsRef.current.get(key);
+    if (!tab || !model || !dirtyRef.current.has(key)) return;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      await bridge.request<FsWriteResult>('fs.write', {
+        path: tab.path,
+        root: tab.root,
+        content: model.getValue(),
+        encoding: encodingsRef.current.get(key) ?? 'utf-8',
+      });
+      savedVersionRef.current.set(key, model.getAlternativeVersionId());
+      markDirty(tab.path, false);
+    } catch (e: unknown) {
+      setSaveError(displayError(e));
+    } finally {
+      setSaving(false);
+    }
+  }, [markDirty]);
+
+  const saveRef = useRef(save);
+  saveRef.current = save;
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 's') return;
+      if (activePathRef.current == null) return;
+      e.preventDefault();
+      void saveRef.current();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  const activeKey = activePath ? tabKey(activePath) : '';
+  const activeState = activePath ? states.get(activeKey) : undefined;
+  const isDirty = activePath ? dirty.has(activeKey) : false;
+  const encoding = activePath ? encodingsRef.current.get(activeKey) : undefined;
 
   return (
     <div className="term-body file-viewer" hidden={activePath == null}>
       <div ref={hostRef} className="viewer-host" />
+      {activePath && activeState?.kind === 'ready' && (
+        <div className="viewer-bar">
+          <span className="viewer-bar-meta">{encoding ? encodingLabel(encoding) : ''}</span>
+          {saveError
+            ? <span className="viewer-bar-error">{saveError}</span>
+            : isDirty
+              ? <span className="viewer-bar-dirty">未保存</span>
+              : <span className="viewer-bar-ok">已保存</span>}
+          <button className="btn small" type="button" disabled={!isDirty || saving} onClick={() => void save()}>
+            {saving ? '保存中…' : '保存'}
+          </button>
+        </div>
+      )}
       {activePath && activeState?.kind === 'loading' && (
         <div className="viewer-overlay"><p className="viewer-msg">读取中…</p></div>
       )}

@@ -560,4 +560,23 @@ public class BridgeTests : IDisposable
         Assert.Equal("validation", ErrorOf(resp!)!.Value.Code);
         Assert.Equal("路径不能为空", ErrorOf(resp!)!.Value.Message);
     }
+
+    [Fact]
+    public async Task FsWrite_OverwritesExistingFile()
+    {
+        var file = Path.Combine(_dir, "edit.txt");
+        File.WriteAllText(file, "old");
+        var fileJson = file.Replace("\\", "\\\\");
+        var rootJson = _dir.Replace("\\", "\\\\");
+        var resp = await _bridge.Dispatcher.HandleAsync(
+            $$$"""{"id":88,"method":"fs.write","params":{"path":"{{{fileJson}}}","root":"{{{rootJson}}}","content":"new 内容","encoding":"utf-8"}}""");
+        Assert.Null(ErrorOf(resp!));
+        Assert.Equal("new 内容", File.ReadAllText(file));
+        Assert.True(ResultOf(resp!).GetProperty("size").GetInt64() > 0);
+
+        var dirResp = await _bridge.Dispatcher.HandleAsync(
+            $$$"""{"id":89,"method":"fs.write","params":{"path":"{{{rootJson}}}","root":"{{{rootJson}}}","content":"x"}}""");
+        Assert.Equal("validation", ErrorOf(dirResp!)!.Value.Code);
+        Assert.Equal("只能写入文件", ErrorOf(dirResp!)!.Value.Message);
+    }
 }

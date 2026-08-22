@@ -15,7 +15,7 @@ public sealed record SettingsInfo(AppSettings Settings, IReadOnlyList<CommonDir>
 
 /// <summary>业务方法接线。线程模型：handler 由宿主在 UI 线程串行调用，ConfigStore 变更无需加锁；
 /// 例外：tools.rescan——扫描与合并已 Task.Run 化，且只读脱离 store 的快照、不触碰 ConfigStore，
-/// 合并结果回 UI 线程写回；fs.list / fs.read / fs.readImage / fs.open / fs.openWithSystem / fs.delete——磁盘与壳操作亦 Task.Run，不碰 ConfigStore。
+/// 合并结果回 UI 线程写回；fs.list / fs.read / fs.readImage / fs.write / fs.open / fs.openWithSystem / fs.delete——磁盘与壳操作亦 Task.Run，不碰 ConfigStore。
 /// 终端 Output/Exited/Changed 事件来自后台线程，经 Dispatcher.Emit 透传
 /// （Emit 仅做序列化，不写共享状态）。</summary>
 public sealed class ForgeDeckBridge
@@ -358,6 +358,13 @@ public sealed class ForgeDeckBridge
             return await Task.Run(() => FileReader.Read(path, root));
         });
 
+        Dispatcher.Register("fs.write", async p =>
+        {
+            var (path, root) = FsArgs(p);
+            var (content, encoding) = FsWriteArgs(p);
+            return await Task.Run(() => FileWriter.Write(path, root, content, encoding));
+        });
+
         Dispatcher.Register("fs.readImage", async p =>
         {
             var (path, root) = FsArgs(p);
@@ -593,6 +600,24 @@ public sealed class ForgeDeckBridge
                 root = rootEl.GetString() ?? "";
         }
         return (path, root);
+    }
+
+    private static (string content, string encoding) FsWriteArgs(JsonElement? p)
+    {
+        var content = "";
+        var encoding = "utf-8";
+        if (p is JsonElement pe)
+        {
+            if (pe.TryGetProperty("content", out var c))
+            {
+                if (c.ValueKind != JsonValueKind.String)
+                    throw new BridgeException("validation", "内容必须是字符串");
+                content = c.GetString() ?? "";
+            }
+            if (pe.TryGetProperty("encoding", out var e) && e.ValueKind == JsonValueKind.String)
+                encoding = e.GetString() ?? "utf-8";
+        }
+        return (content, encoding);
     }
 
     private static List<CommonDir> CommonDirs()
