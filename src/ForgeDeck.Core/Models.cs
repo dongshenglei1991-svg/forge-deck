@@ -3,6 +3,8 @@ namespace ForgeDeck.Core;
 public enum ToolType { Cli, Gui }
 public enum OpenMode { Embedded, External }
 public enum CloseBehavior { Ask, Exit, MinimizeToTray }
+public enum ColorMode { Dark, Light, System }
+public enum AccentColor { Teal, Blue, Violet, Amber, Rose }
 
 public sealed class ToolInfo
 {
@@ -37,6 +39,8 @@ public sealed class AppSettings
     public bool PreferEmbedded { get; set; } = true;
     public int MaxWorkdirHistory { get; set; } = 20;
     public CloseBehavior CloseBehavior { get; set; } = CloseBehavior.Ask;
+    public ColorMode ColorMode { get; set; } = ColorMode.Dark;
+    public AccentColor AccentColor { get; set; } = AccentColor.Teal;
 }
 
 public sealed class LastUsedInfo

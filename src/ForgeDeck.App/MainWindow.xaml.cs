@@ -44,10 +44,9 @@ public partial class MainWindow : Window
             _terminal);
         _bridge.Dispatcher.Outgoing += Post;
         RegisterWindowMethods();
-        // 必须与 app.css 的 bg 令牌一致：缩放动画期间新露出的窄条由它填充，
-        // 色差会被看成闪一下（ForgeDeckTheme.Bg 就是那个令牌的实际 sRGB 值）
-        Web.DefaultBackgroundColor = System.Drawing.Color.FromArgb(
-            ForgeDeckTheme.Bg.R, ForgeDeckTheme.Bg.G, ForgeDeckTheme.Bg.B);
+        ApplyNativeChrome();
+        SystemEvents.UserPreferenceChanged += OnSystemPreferenceChanged;
+        Closed += (_, _) => SystemEvents.UserPreferenceChanged -= OnSystemPreferenceChanged;
         Web.CoreWebView2InitializationCompleted += OnWebReady;
         Loaded += OnWindowLoaded;
         Closing += OnClosing;
@@ -241,13 +240,40 @@ public partial class MainWindow : Window
         var core = Web.CoreWebView2;
         core.WebMessageReceived += async (_, args) =>
         {
-            var response = await _bridge.Dispatcher.HandleAsync(args.TryGetWebMessageAsString());
+            var json = args.TryGetWebMessageAsString();
+            var response = await _bridge.Dispatcher.HandleAsync(json);
+            if (json != null && json.Contains("\"settings.save\"", StringComparison.Ordinal))
+                ApplyNativeChrome();
             if (response != null) Post(response);
         };
         if (Environment.GetEnvironmentVariable("FORGEDECK_DEV") == "1")
             core.Navigate("http://localhost:5173");
         else
             core.Navigate(new Uri(Path.Combine(AppContext.BaseDirectory, "wwwroot", "index.html")).AbsoluteUri);
+    }
+
+    /// <summary>窗口/WebView 底色与本机对话框令牌跟随设置里的浅深色和主题色。</summary>
+    private void ApplyNativeChrome()
+    {
+        ForgeDeckTheme.Apply(_store.Config.Settings.ColorMode, _store.Config.Settings.AccentColor);
+        var bg = ForgeDeckTheme.Bg;
+        var brush = ForgeDeckTheme.Brush(bg);
+        Background = brush;
+        Root.Background = brush;
+        Web.DefaultBackgroundColor = System.Drawing.Color.FromArgb(bg.A, bg.R, bg.G, bg.B);
+    }
+
+    private void OnSystemPreferenceChanged(object sender, UserPreferenceChangedEventArgs e)
+    {
+        if (e.Category is not (UserPreferenceCategory.General or UserPreferenceCategory.Color)) return;
+        if (_store.Config.Settings.ColorMode != ColorMode.System) return;
+        if (!Dispatcher.CheckAccess())
+        {
+            try { Dispatcher.BeginInvoke(() => OnSystemPreferenceChanged(sender, e)); }
+            catch (InvalidOperationException) { }
+            return;
+        }
+        ApplyNativeChrome();
     }
 
     private void Post(string message)

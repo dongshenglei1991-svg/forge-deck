@@ -6,6 +6,24 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark" />
     <title>ForgeDeck</title>
+    <script>
+      (function () {
+        try {
+          var t = localStorage.getItem('forgedeck-theme');
+          var a = localStorage.getItem('forgedeck-accent');
+          if (t === 'system')
+            t = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+          if (t === 'light' || t === 'dark') {
+            document.documentElement.dataset.theme = t;
+            document.documentElement.style.colorScheme = t;
+            var meta = document.querySelector('meta[name="color-scheme"]');
+            if (meta) meta.setAttribute('content', t);
+          }
+          if (a === 'teal' || a === 'blue' || a === 'violet' || a === 'amber' || a === 'rose')
+            document.documentElement.dataset.accent = a;
+        } catch (e) {}
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

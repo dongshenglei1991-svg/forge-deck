@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { bridge } from './bridge';
+import { monacoThemeName } from './appearance';
 import { languageForPath, monaco } from './monacoSetup';
+import type { ResolvedColorMode } from './types';
 import type { FsReadResult } from './types';
 
 /** 一个已打开的文件 tab：path 是显示与去重键，root 是打开时的工作目录（fs.read 的路径守卫用） */
@@ -27,13 +29,16 @@ function displayError(e: unknown) {
  * 文本查看器：单个 Monaco 编辑器实例 + 每文件一个 Model（切 tab 只换 model，不开新实例）。
  * 读取失败（超 1MB / 二进制 / 文件被删）在 tab 内联展示错误与重试，不弹 toast 打扰终端。
  */
-export function FileViewerPanel({ tabs, activePath, onClose }: {
+export function FileViewerPanel({ tabs, activePath, colorMode, onClose }: {
   tabs: ViewerTab[];
   activePath: string | null;
+  colorMode: ResolvedColorMode;
   onClose: (path: string) => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
+  const colorModeRef = useRef(colorMode);
+  colorModeRef.current = colorMode;
   const modelsRef = useRef(new Map<string, monaco.editor.ITextModel>());
   const inflight = useRef(new Set<string>());
   const tabsRef = useRef(tabs);
@@ -45,7 +50,7 @@ export function FileViewerPanel({ tabs, activePath, onClose }: {
   useEffect(() => {
     if (!hostRef.current) return;
     const editor = monaco.editor.create(hostRef.current, {
-      theme: 'forgedeck-dark',
+      theme: monacoThemeName(colorModeRef.current),
       readOnly: true,
       minimap: { enabled: false },
       automaticLayout: true, // 内建 ResizeObserver：窗口缩放 / 分栏变化自动重排
@@ -65,7 +70,11 @@ export function FileViewerPanel({ tabs, activePath, onClose }: {
       editor.dispose();
       editorRef.current = null;
     };
-  }, []);
+  }, []); // 主题切换走 setTheme，不重建实例
+
+  useEffect(() => {
+    monaco.editor.setTheme(monacoThemeName(colorMode));
+  }, [colorMode]);
 
   const load = useCallback(async (tab: ViewerTab) => {
     const key = tabKey(tab.path);

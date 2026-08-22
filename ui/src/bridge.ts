@@ -92,7 +92,7 @@ class MockBridge implements Bridge {
     { tool: { id: 't-manual', name: '自研脚本', type: 'cli', exePath: 'C:\\Tools\\mine.cmd', source: '手动添加', builtin: false, manual: true, pathPinned: false }, exists: true, defaultMode: 'embedded' },
   ];
   private readonly settings: SettingsInfo = {
-    settings: { defaultShell: 'pwsh', autoScanOnStartup: true, extraScanDirs: [], skipExitConfirm: false, preferEmbedded: true, maxWorkdirHistory: 20, closeBehavior: 'ask' },
+    settings: { defaultShell: 'pwsh', autoScanOnStartup: true, extraScanDirs: [], skipExitConfirm: false, preferEmbedded: true, maxWorkdirHistory: 20, closeBehavior: 'ask', colorMode: 'dark', accentColor: 'teal' },
     commonDirs: [
       { name: '主目录', path: 'C:\\Users\\dev' },
       { name: '桌面', path: 'C:\\Users\\dev\\Desktop' },

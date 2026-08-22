@@ -1,23 +1,32 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type CSSProperties } from 'react';
+import { ACCENTS, COLOR_MODES, normalizeAccentColor, normalizeColorMode } from './appearance';
+import { MenuSelect } from './MenuSelect';
 import { Switch } from './Switch';
-import type { AppSettings, SettingsInfo } from './types';
+import type { AccentColor, AppSettings, ColorMode, SettingsInfo } from './types';
 
-export function SettingsView({ info, onSave }: { info: SettingsInfo; onSave: (s: AppSettings) => void }) {
+export function SettingsView({ info, onSave, onAppearance }: {
+  info: SettingsInfo;
+  onSave: (s: AppSettings) => void;
+  onAppearance: (colorMode: ColorMode, accentColor: AccentColor) => void;
+}) {
   const [extraDirs, setExtraDirs] = useState(info.settings.extraScanDirs.join('\n'));
   const [autoScan, setAutoScan] = useState(info.settings.autoScanOnStartup);
   const [shell, setShell] = useState<string>(info.settings.defaultShell);
   const [skipExitConfirm, setSkipExitConfirm] = useState(info.settings.skipExitConfirm);
   const [preferEmbedded, setPreferEmbedded] = useState(info.settings.preferEmbedded);
   const [closeBehavior, setCloseBehavior] = useState(info.settings.closeBehavior);
+  const [colorMode, setColorMode] = useState<ColorMode>(() => normalizeColorMode(info.settings.colorMode));
+  const [accentColor, setAccentColor] = useState<AccentColor>(() => normalizeAccentColor(info.settings.accentColor));
 
-  useEffect(() => {
-    setExtraDirs(info.settings.extraScanDirs.join('\n'));
-    setAutoScan(info.settings.autoScanOnStartup);
-    setShell(info.settings.defaultShell);
-    setSkipExitConfirm(info.settings.skipExitConfirm);
-    setPreferEmbedded(info.settings.preferEmbedded);
-    setCloseBehavior(info.settings.closeBehavior);
-  }, [info]);
+  const dirsText = info.settings.extraScanDirs.join('\n');
+  useEffect(() => { setExtraDirs(dirsText); }, [dirsText]);
+  useEffect(() => { setAutoScan(info.settings.autoScanOnStartup); }, [info.settings.autoScanOnStartup]);
+  useEffect(() => { setShell(info.settings.defaultShell); }, [info.settings.defaultShell]);
+  useEffect(() => { setSkipExitConfirm(info.settings.skipExitConfirm); }, [info.settings.skipExitConfirm]);
+  useEffect(() => { setPreferEmbedded(info.settings.preferEmbedded); }, [info.settings.preferEmbedded]);
+  useEffect(() => { setCloseBehavior(info.settings.closeBehavior); }, [info.settings.closeBehavior]);
+  useEffect(() => { setColorMode(normalizeColorMode(info.settings.colorMode)); }, [info.settings.colorMode]);
+  useEffect(() => { setAccentColor(normalizeAccentColor(info.settings.accentColor)); }, [info.settings.accentColor]);
 
   // 载荷侧校验：非法 shell（如手输 bash）回退 pwsh；输入框保留用户原文，不就地改写
   const shellValue = (['pwsh', 'powershell', 'cmd'].includes(shell.trim()) ? shell.trim() : 'pwsh') as AppSettings['defaultShell'];
@@ -29,7 +38,18 @@ export function SettingsView({ info, onSave }: { info: SettingsInfo; onSave: (s:
     skipExitConfirm,
     preferEmbedded,
     closeBehavior,
+    colorMode,
+    accentColor,
   });
+
+  const changeMode = (next: ColorMode) => {
+    setColorMode(next);
+    onAppearance(next, accentColor);
+  };
+  const changeAccent = (next: AccentColor) => {
+    setAccentColor(next);
+    onAppearance(colorMode, next);
+  };
 
   return (
     <>
@@ -37,7 +57,7 @@ export function SettingsView({ info, onSave }: { info: SettingsInfo; onSave: (s:
         <div>
           <p className="eyebrow">SYSTEM PREFERENCES / 04</p>
           <h1 className="title">设置</h1>
-          <p className="sub">调整扫描范围、终端行为和启动器偏好。</p>
+          <p className="sub">调整外观、扫描范围、终端行为和启动器偏好。</p>
         </div>
       </div>
       <div className="settings-grid">
@@ -61,6 +81,25 @@ export function SettingsView({ info, onSave }: { info: SettingsInfo; onSave: (s:
           </div>
           <Switch on={skipExitConfirm} label="关闭应用时不弹会话确认" onToggle={() => setSkipExitConfirm((v) => !v)} />
           <Switch on={preferEmbedded} label="优先使用内嵌终端" onToggle={() => setPreferEmbedded((v) => !v)} />
+        </article>
+        <article className="setting-card span-2">
+          <h2>外观</h2>
+          <p>颜色模式可跟随 Windows 浅色 / 深色。更改立即生效并记住。</p>
+          <div className="field appearance-mode">
+            <label>颜色模式</label>
+            <MenuSelect ariaLabel="颜色模式" value={colorMode} options={COLOR_MODES}
+              onChange={(v) => changeMode(normalizeColorMode(v))} />
+          </div>
+          <div className="swatch-row" role="radiogroup" aria-label="主题色">
+            {ACCENTS.map((a) => (
+              <button key={a.id} type="button" className="swatch"
+                role="radio" aria-checked={accentColor === a.id} aria-label={a.label}
+                style={{ '--swatch-hue': String(a.hue) } as CSSProperties}
+                title={a.label}
+                onClick={() => changeAccent(a.id)} />
+            ))}
+          </div>
+          <p className="swatch-caption">{ACCENTS.find((a) => a.id === accentColor)?.label}</p>
         </article>
         <article className="setting-card span-2">
           <h2>关闭行为</h2>

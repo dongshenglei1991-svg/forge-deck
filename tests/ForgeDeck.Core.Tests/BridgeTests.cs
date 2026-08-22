@@ -256,6 +256,29 @@ public class BridgeTests : IDisposable
         Assert.True(_store.Config.Settings.SkipExitConfirm);
         Assert.Equal("minimizeToTray", ResultOf(saveResp!).GetProperty("settings").GetProperty("closeBehavior").GetString());
         Assert.Equal(CloseBehavior.MinimizeToTray, _store.Config.Settings.CloseBehavior);
+        Assert.Equal("dark", ResultOf(saveResp!).GetProperty("settings").GetProperty("colorMode").GetString());
+        Assert.Equal("teal", ResultOf(saveResp!).GetProperty("settings").GetProperty("accentColor").GetString());
+    }
+
+    [Fact]
+    public async Task SettingsSave_Appearance_RoundTrip()
+    {
+        var saveResp = await _bridge.Dispatcher.HandleAsync(
+            """{"id":14,"method":"settings.save","params":{"settings":{"defaultShell":"pwsh","autoScanOnStartup":true,"extraScanDirs":[],"skipExitConfirm":false,"preferEmbedded":true,"maxWorkdirHistory":20,"closeBehavior":"ask","colorMode":"light","accentColor":"blue"}}}""");
+        var settings = ResultOf(saveResp!).GetProperty("settings");
+        Assert.Equal("light", settings.GetProperty("colorMode").GetString());
+        Assert.Equal("blue", settings.GetProperty("accentColor").GetString());
+        Assert.Equal(ColorMode.Light, _store.Config.Settings.ColorMode);
+        Assert.Equal(AccentColor.Blue, _store.Config.Settings.AccentColor);
+    }
+
+    [Fact]
+    public async Task SettingsSave_SystemColorMode_RoundTrip()
+    {
+        var saveResp = await _bridge.Dispatcher.HandleAsync(
+            """{"id":15,"method":"settings.save","params":{"settings":{"defaultShell":"pwsh","autoScanOnStartup":true,"extraScanDirs":[],"skipExitConfirm":false,"preferEmbedded":true,"maxWorkdirHistory":20,"closeBehavior":"ask","colorMode":"system","accentColor":"teal"}}}""");
+        Assert.Equal("system", ResultOf(saveResp!).GetProperty("settings").GetProperty("colorMode").GetString());
+        Assert.Equal(ColorMode.System, _store.Config.Settings.ColorMode);
     }
 
     [Fact]

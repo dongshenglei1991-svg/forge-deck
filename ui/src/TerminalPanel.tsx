@@ -7,17 +7,8 @@ import { FileTreePanel } from './FileTreePanel';
 import { FileViewerPanel, type ViewerTab } from './FileViewerPanel';
 import { ImageViewerPanel } from './ImageViewerPanel';
 import { fileBadge } from './fileIcons';
-import type { TerminalSessionInfo } from './types';
-
-// 若 xterm canvas 渲染不支持 oklch（表现为黑底/默认色），换成十六进制近似值：
-// background '#0d1211'、foreground '#b8c4bf'、cursor '#8fe3b0'、cursorAccent '#0d1211'
-const THEME = {
-  background: 'oklch(13% 0.02 170)',
-  foreground: 'oklch(78% 0.02 170)',
-  cursor: 'oklch(78% 0.15 155)',
-  cursorAccent: 'oklch(13% 0.02 170)',
-  selectionBackground: 'rgba(140, 255, 190, 0.25)',
-};
+import { readXtermTheme } from './appearance';
+import type { AccentColor, ResolvedColorMode, TerminalSessionInfo } from './types';
 
 // write/resize 的在途失败：session-gone 前缀（关标签瞬间的良性竞态，后端会话校验）静默忽略，其余打日志
 function ignoreSessionGone(e: unknown) {
@@ -63,11 +54,13 @@ function tabKindOf(path: string): FileTabKind {
   return IMAGE_EXT.has(name.slice(dot + 1).toLowerCase()) ? 'image' : 'text';
 }
 
-export function TerminalPanel({ sessions, activeId, visible, workdir, onError, onInfo, onActivate, onNewSession, onCloseSession }: {
+export function TerminalPanel({ sessions, activeId, visible, workdir, colorMode, accentColor, onError, onInfo, onActivate, onNewSession, onCloseSession }: {
   sessions: TerminalSessionInfo[];
   activeId: string | null;
   visible: boolean;
   workdir: string | null;
+  colorMode: ResolvedColorMode;
+  accentColor: AccentColor;
   onError: (msg: string) => void;
   onInfo?: (msg: string) => void;
   onActivate: (id: string) => void;
@@ -130,7 +123,7 @@ export function TerminalPanel({ sessions, activeId, visible, workdir, onError, o
       const term = new Terminal({
         fontSize: 13,
         cursorBlink: true,
-        theme: THEME,
+        theme: readXtermTheme(),
         // 与 --font-mono 同步：西文走 Cascadia/Consolas，缺字形时回退微软雅黑，避免 monospace→新宋体
         fontFamily: getComputedStyle(document.documentElement)
           .getPropertyValue('--font-mono').trim()
@@ -152,6 +145,11 @@ export function TerminalPanel({ sessions, activeId, visible, workdir, onError, o
       observers.current.set(id, observer);
     }
   }, [sessions]);
+
+  useEffect(() => {
+    const theme = readXtermTheme();
+    for (const entry of terms.current.values()) entry.term.options.theme = theme;
+  }, [colorMode, accentColor]);
 
   useEffect(() => {
     if (!visible || activeFilePath || !activeId) return;
@@ -212,6 +210,7 @@ export function TerminalPanel({ sessions, activeId, visible, workdir, onError, o
             <FileViewerPanel
               tabs={fileTabs.filter((t) => t.kind === 'text')}
               activePath={activeTab?.kind === 'text' ? activeFilePath : null}
+              colorMode={colorMode}
               onClose={closeFileTab}
             />
             <ImageViewerPanel

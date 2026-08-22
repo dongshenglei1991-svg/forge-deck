@@ -117,6 +117,47 @@ public class ConfigStoreTests : IDisposable
     }
 
     [Fact]
+    public void Load_OldSettingsWithoutAppearance_DefaultsToDarkTeal()
+    {
+        var path = PathFor("config.json");
+        File.WriteAllText(path, """{"version":1,"settings":{"defaultShell":"pwsh"}}""");
+        var store = new ConfigStore(path);
+        store.Load();
+        Assert.Equal(ColorMode.Dark, store.Config.Settings.ColorMode);
+        Assert.Equal(AccentColor.Teal, store.Config.Settings.AccentColor);
+    }
+
+    [Fact]
+    public void SaveThenLoad_RoundTripsAppearance()
+    {
+        var path = PathFor("config.json");
+        var store = new ConfigStore(path);
+        store.Config.Settings.ColorMode = ColorMode.Light;
+        store.Config.Settings.AccentColor = AccentColor.Violet;
+        store.Save();
+        var json = File.ReadAllText(path);
+        Assert.Contains("\"colorMode\": \"light\"", json);
+        Assert.Contains("\"accentColor\": \"violet\"", json);
+        var reloaded = new ConfigStore(path);
+        reloaded.Load();
+        Assert.Equal(ColorMode.Light, reloaded.Config.Settings.ColorMode);
+        Assert.Equal(AccentColor.Violet, reloaded.Config.Settings.AccentColor);
+    }
+
+    [Fact]
+    public void SaveThenLoad_RoundTripsSystemColorMode()
+    {
+        var path = PathFor("config.json");
+        var store = new ConfigStore(path);
+        store.Config.Settings.ColorMode = ColorMode.System;
+        store.Save();
+        Assert.Contains("\"colorMode\": \"system\"", File.ReadAllText(path));
+        var reloaded = new ConfigStore(path);
+        reloaded.Load();
+        Assert.Equal(ColorMode.System, reloaded.Config.Settings.ColorMode);
+    }
+
+    [Fact]
     public void Load_CorruptFile_BackupFails_StillReturnsDefaults()
     {
         var path = PathFor("config.json");

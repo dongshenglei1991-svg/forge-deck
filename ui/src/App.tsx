@@ -12,7 +12,8 @@ import { ToolsView } from './ToolsView';
 import { SettingsView } from './SettingsView';
 import { Toast, type ToastItem } from './Toast';
 import { ResizeHandles } from './ResizeHandles';
-import type { AppInfo, AppSettings, HiddenTool, LaunchProfile, SettingsInfo, TerminalSessionInfo, ToolListItem } from './types';
+import { applyAppearance, normalizeAccentColor, normalizeColorMode, resolveColorMode } from './appearance';
+import type { AccentColor, AppInfo, AppSettings, ColorMode, HiddenTool, LaunchProfile, ResolvedColorMode, SettingsInfo, TerminalSessionInfo, ToolListItem } from './types';
 
 const VIEW_TITLES: Record<View, string> = { launcher: '快速启动', tools: '工具库', sessions: '终端会话', settings: '设置' };
 
@@ -37,6 +38,10 @@ export default function App() {
     run: () => void | Promise<void>;
   } | null>(null);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const [resolvedMode, setResolvedMode] = useState<ResolvedColorMode>(() => {
+    try { return resolveColorMode(normalizeColorMode(localStorage.getItem('forgedeck-theme'))); }
+    catch { return 'dark'; }
+  });
   const toast = useCallback((text: string, kind: ToastItem['kind'] = 'info') => {
     const item: ToastItem = { id: Date.now() + Math.random(), text, kind };
     setToasts((prev) => [...prev, item]);
@@ -104,6 +109,18 @@ export default function App() {
     const off = bridge.on('sessions.changed', () => { refreshSessions(); });
     return () => { disposed = true; off(); };
   }, [refreshSessions, refreshWorkdirs, refreshHidden, selectTool, toast]);
+
+  const colorPref = normalizeColorMode(settingsInfo?.settings.colorMode);
+  const accentPref = normalizeAccentColor(settingsInfo?.settings.accentColor);
+
+  useEffect(() => {
+    const apply = () => setResolvedMode(applyAppearance(colorPref, accentPref));
+    apply();
+    if (colorPref !== 'system') return;
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    mq.addEventListener('change', apply);
+    return () => mq.removeEventListener('change', apply);
+  }, [colorPref, accentPref]);
 
   const applyTools = useCallback(async (list: ToolListItem[]) => {
     setTools(list);
@@ -320,6 +337,7 @@ export default function App() {
 
   const handleSaveSettings = useCallback(async (settings: AppSettings) => {
     try {
+      setResolvedMode(applyAppearance(settings.colorMode, settings.accentColor));
       setSettingsInfo(await bridge.request<SettingsInfo>('settings.save', { settings }));
       toast('设置已保存');
     } catch (e: any) {
@@ -327,6 +345,18 @@ export default function App() {
       toast(e.message, 'error');
     }
   }, [toast]);
+
+  const handleAppearance = useCallback(async (colorMode: ColorMode, accentColor: AccentColor) => {
+    setResolvedMode(applyAppearance(colorMode, accentColor));
+    if (!settingsInfo) return;
+    try {
+      setSettingsInfo(await bridge.request<SettingsInfo>('settings.save', {
+        settings: { ...settingsInfo.settings, colorMode, accentColor },
+      }));
+    } catch (e: any) {
+      toast(e.message, 'error');
+    }
+  }, [settingsInfo, toast]);
 
   const applyCloseChoice = useCallback(async (action: 'tray' | 'exit', remember: boolean) => {
     setClosePromptOpen(false);
@@ -409,11 +439,13 @@ export default function App() {
         <section className="view-panel" data-view-panel="sessions" hidden={view !== 'sessions'}>
           <TerminalPanel visible={termStage} sessions={sessions} activeId={activeSessionId}
             workdir={sessions.find((s) => s.sessionId === activeSessionId)?.workdir ?? null}
+            colorMode={resolvedMode}
+            accentColor={accentPref}
             onError={handleFileTreeError} onInfo={(msg) => toast(msg)}
             onActivate={setActiveSessionId} onNewSession={handleNewShell} onCloseSession={handleCloseSession} />
         </section>
         <section className="view-panel" data-view-panel="settings" hidden={view !== 'settings'}>
-          {settingsInfo && <SettingsView info={settingsInfo} onSave={handleSaveSettings} />}
+          {settingsInfo && <SettingsView info={settingsInfo} onSave={handleSaveSettings} onAppearance={handleAppearance} />}
         </section>
       </main>
       <AddToolModal open={addOpen} onClose={() => setAddOpen(false)} onConfirm={handleAddTool} />

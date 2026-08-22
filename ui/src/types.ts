@@ -29,6 +29,10 @@ export interface LaunchProfile {
   autoRestore: boolean;
 }
 
+export type ColorMode = 'dark' | 'light' | 'system';
+export type ResolvedColorMode = 'dark' | 'light';
+export type AccentColor = 'teal' | 'blue' | 'violet' | 'amber' | 'rose';
+
 export interface AppSettings {
   defaultShell: 'pwsh' | 'powershell' | 'cmd';
   autoScanOnStartup: boolean;
@@ -37,6 +41,8 @@ export interface AppSettings {
   preferEmbedded: boolean;
   maxWorkdirHistory: number;
   closeBehavior: 'ask' | 'exit' | 'minimizeToTray';
+  colorMode: ColorMode;
+  accentColor: AccentColor;
 }
 
 export interface CommonDir { name: string; path: string }
