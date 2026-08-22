@@ -41,6 +41,7 @@ internal sealed class WindowMotion
     private Rect? _pinnedPx;
     private EventHandler? _tick;
     private bool _transitionsSuspended;
+    private bool _busy;
 
     public WindowMotion(Window window, Func<Rect> workAreaPx)
     {
@@ -49,21 +50,30 @@ internal sealed class WindowMotion
         _window.Closed += (_, _) => StopTick();
     }
 
-    /// <summary>动画进行中：此时别让系统移动/缩放循环插进来抢窗口。</summary>
-    public bool Busy { get; private set; }
+    /// <summary>动画进行中：此时别让系统移动/缩放循环插进来抢窗口。
+    /// 光晕也靠这个位：最大化动画期间 WindowState 仍是 Normal，若不挡住光晕会按工作区再外扩一圈。</summary>
+    public bool Busy
+    {
+        get => _busy;
+        private set
+        {
+            if (_busy == value) return;
+            _busy = value;
+            BusyChanged?.Invoke(this, EventArgs.Empty);
+        }
+    }
 
-    /// <summary>WindowStyle=None 的窗口缺少最小化/还原所需的样式位，DWM 的最小化过渡会
-    /// 消失；补回 WS_SYSMENU|WS_MINIMIZEBOX|WS_MAXIMIZEBOX 并明确允许过渡。
+    public event EventHandler? BusyChanged;
+
+    /// <summary>无边框窗口丢掉 WS_CAPTION 后 DWM 最小化过渡会消失；补回样式并明确允许过渡。
     /// 属性 3 是 DWMWA_TRANSITIONS_FORCEDISABLED：TRUE 是关掉动画，不是打开。
     ///
-    /// 千万别把 WS_CAPTION 一起补上。它是这几位里唯一影响边框度量的（WS_BORDER|
-    /// WS_DLGFRAME），带上它以后 USER32 会把最大化矩形按边框宽度往外扩一圈（实测 125%
-    /// 缩放下四边各 7 逻辑像素），而 WindowChrome 把客户区拉平到了整个窗口矩形 ——
-    /// 那一圈就成了跑到屏幕外的客户区，右边和下边的内容被切掉。</summary>
+    /// WS_CAPTION 会让 USER32 把最大化矩形按尺寸框外扩。客户区由 WM_NCCALCSIZE 裁回工作区，
+    /// 不要在 WINDOWPOSCHANGING 里把窗口钉回工作区，否则 WPF 不会进入 Maximized。</summary>
     public static void InstallSystemTransitions(IntPtr hwnd)
     {
         var style = Native.GetWindowLong(hwnd, Native.GwlStyle).ToInt64();
-        style |= Native.WsSysMenu | Native.WsMinimizeBox | Native.WsMaximizeBox;
+        style |= Native.WsCaption | Native.WsSysMenu | Native.WsMinimizeBox | Native.WsMaximizeBox;
         Native.SetWindowLong(hwnd, Native.GwlStyle, new IntPtr(style));
         Native.SetWindowPos(hwnd, IntPtr.Zero, 0, 0, 0, 0,
             Native.SwpNoMove | Native.SwpNoSize | Native.SwpNoZOrder | Native.SwpNoActivate | Native.SwpFrameChanged);
@@ -80,7 +90,8 @@ internal sealed class WindowMotion
     }
 
     /// <summary>WM_WINDOWPOSCHANGING 钩子：把窗口落点钉死在 _pinnedPx。
-    /// 只在"脱离最大化但先别动"的那一瞬间生效，其余时间是空操作。</summary>
+    /// 只在"脱离最大化但先别动"的那一瞬间生效。不要在 Maximized 时改矩形——
+    /// USER32 需要外扩尺寸框，WPF 才能把 WindowState 设成 Maximized（按钮才会变成还原）。</summary>
     public void OnWindowPosChanging(IntPtr lParam)
     {
         if (_pinnedPx is not { } px || px.Width <= 0 || px.Height <= 0) return;
@@ -126,6 +137,8 @@ internal sealed class WindowMotion
             return;
         }
         SuspendSystemTransitions();
+        // 先 Busy：还原瞬间 WindowState 已是 Normal 但矩形还是工作区，光晕不能按这个尺寸外扩。
+        Busy = true;
         // 先脱离 Maximized 但把落点钉在当前矩形，再由动画走到 to
         _pinnedPx = from;
         _window.WindowState = WindowState.Normal;
@@ -153,14 +166,24 @@ internal sealed class WindowMotion
                 Place(hwnd, Lerp(fromPx, toPx, OutCubic(t)));
             if (t < 1) return;
             StopTick();
-            Busy = false;
-            if (!aborted)
-                Place(hwnd, toPx); // 收尾精确落位，抹掉逐帧取整的残差
-            try { done(); }
+            try
+            {
+                if (!aborted)
+                {
+                    Place(hwnd, toPx); // 收尾精确落位，抹掉逐帧取整的残差
+                    done(); // 最大化：先改 WindowState，Busy 仍为 true，光晕不会按 Normal 工作区外扩
+                }
+                else
+                    ResumeSystemTransitions();
+            }
             catch
             {
                 ResumeSystemTransitions();
                 throw;
+            }
+            finally
+            {
+                Busy = false;
             }
         }
         _tick = Tick;
@@ -213,6 +236,12 @@ internal sealed class WindowMotion
     private void ResumeSystemTransitions()
     {
         if (!_transitionsSuspended) return;
+        EnableSystemTransitions();
+    }
+
+    /// <summary>最小化前无条件打开 DWM 过渡。最大化动画若异常退出，可能把过渡留在关掉状态。</summary>
+    public void EnableSystemTransitions()
+    {
         _transitionsSuspended = false;
         var hwnd = new WindowInteropHelper(_window).Handle;
         if (hwnd == IntPtr.Zero) return;
@@ -265,6 +294,7 @@ internal sealed class WindowMotion
     private static class Native
     {
         internal const int GwlStyle = -16;
+        internal const int WsCaption = 0x00C00000;
         internal const int WsSysMenu = 0x00080000;
         internal const int WsMinimizeBox = 0x00020000;
         internal const int WsMaximizeBox = 0x00010000;

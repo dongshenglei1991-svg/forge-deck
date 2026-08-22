@@ -4,27 +4,30 @@ using System.Windows.Controls;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Effects;
+using ForgeDeck.Core;
 
 namespace ForgeDeck.App;
 
 /// <summary>
 /// 主窗口外侧的主题色光晕。WebView2 铺满不透明 HWND，CSS 阴影出不了窗体；
 /// 另开一层透明窗口垫在后面，用 DropShadow 把光晕画到桌面上。
-/// 最大化 / 最小化 / 隐藏时收起（工作区贴边没有外侧可画）。
+/// 最大化 / 最小化 / 最大化动画 / 隐藏时收起（工作区贴边没有外侧可画）。
 /// </summary>
 internal sealed class WindowGlow : IDisposable
 {
     private const double PadDip = 32;
     private readonly Window _owner;
+    private readonly Func<bool> _motionBusy;
     private readonly Window _glow;
     private readonly Border _rim;
     private readonly DropShadowEffect _fx;
     private bool _disposed;
     private bool _syncing;
 
-    public WindowGlow(Window owner)
+    public WindowGlow(Window owner, Func<bool>? motionBusy = null)
     {
         _owner = owner;
+        _motionBusy = motionBusy ?? (() => false);
         _fx = new DropShadowEffect
         {
             ShadowDepth = 0,
@@ -69,13 +72,22 @@ internal sealed class WindowGlow : IDisposable
         _rim.Background = ForgeDeckTheme.Brush(ForgeDeckTheme.Bg);
     }
 
+    /// <summary>最小化前先收起，让 DWM 只对主窗口做缩向任务栏的过渡。</summary>
+    public void Collapse()
+    {
+        if (_disposed) return;
+        if (_glow.IsVisible) _glow.Hide();
+    }
+
     public void Sync()
     {
         if (_disposed || _syncing) return;
         _syncing = true;
         try
         {
-            if (!_owner.IsVisible || _owner.WindowState != WindowState.Normal)
+            var maximized = _owner.WindowState == WindowState.Maximized;
+            var minimized = _owner.WindowState == WindowState.Minimized;
+            if (!WindowGlowVisibility.ShouldShow(_owner.IsVisible, maximized, minimized, _motionBusy()))
             {
                 if (_glow.IsVisible) _glow.Hide();
                 return;
@@ -96,7 +108,7 @@ internal sealed class WindowGlow : IDisposable
                 rect.Left - pad, rect.Top - pad,
                 rect.Right - rect.Left + pad * 2,
                 rect.Bottom - rect.Top + pad * 2,
-                Native.SwpNoActivate);
+                Native.SwpNoActivate | Native.SwpNoOwnerZOrder);
         }
         finally { _syncing = false; }
     }
@@ -125,6 +137,7 @@ internal sealed class WindowGlow : IDisposable
         internal const int WsExToolWindow = 0x00000080;
         internal const int WsExNoActivate = 0x08000000;
         internal const uint SwpNoActivate = 0x0010;
+        internal const uint SwpNoOwnerZOrder = 0x0200;
 
         [StructLayout(LayoutKind.Sequential)]
         internal struct Rect

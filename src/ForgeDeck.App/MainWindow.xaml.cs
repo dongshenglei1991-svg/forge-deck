@@ -63,6 +63,7 @@ public partial class MainWindow : Window
         var d = _bridge.Dispatcher;
         d.Register("window.minimize", _ =>
         {
+            PrepareNativeMinimize();
             WindowState = WindowState.Minimized;
             return Task.FromResult<object?>(null);
         });
@@ -144,11 +145,7 @@ public partial class MainWindow : Window
         });
         StateChanged += (_, _) =>
         {
-            // 最大化时关掉调整边框，避免 WindowChrome 再往工作区外扩一圈
-            var chrome = System.Windows.Shell.WindowChrome.GetWindowChrome(this);
-            if (chrome != null)
-                chrome.ResizeBorderThickness = WindowState == WindowState.Maximized
-                    ? new Thickness(0) : new Thickness(8);
+            SyncResizeBorder();
             d.Emit("window.state.changed", new { maximized = WindowState == WindowState.Maximized });
             _glow?.Sync();
         };
@@ -161,13 +158,34 @@ public partial class MainWindow : Window
         {
             source.AddHook(WndProc);
             WindowMotion.InstallSystemTransitions(source.Handle);
-            _glow = new WindowGlow(this);
+            _glow = new WindowGlow(this, () => _motion.Busy);
+            _motion.BusyChanged += (_, _) =>
+            {
+                SyncResizeBorder();
+                _glow?.Sync();
+            };
             _glow.Sync();
         }
     }
 
-    /// <summary>窗口所在显示器的工作区（设备像素，绝对坐标），与 WM_GETMINMAXINFO 回写的
-    /// 最大化目标一致 —— 最大化动画必须走到同一个矩形，收尾置 Maximized 才没有跳变。</summary>
+    /// <summary>最大化或最大化动画期间关掉调整边框，避免 WindowChrome 再往工作区外扩一圈。</summary>
+    private void SyncResizeBorder()
+    {
+        var chrome = System.Windows.Shell.WindowChrome.GetWindowChrome(this);
+        if (chrome == null) return;
+        chrome.ResizeBorderThickness = WindowState == WindowState.Maximized || _motion.Busy
+            ? new Thickness(0) : new Thickness(8);
+    }
+
+    /// <summary>DWM 最小化动画前：打开系统过渡，并先收起光晕窗口，避免第二份 HWND 抢过渡。</summary>
+    private void PrepareNativeMinimize()
+    {
+        _motion.EnableSystemTransitions();
+        _glow?.Collapse();
+    }
+
+    /// <summary>窗口所在显示器的工作区（设备像素，绝对坐标）。最大化动画走到这里；
+    /// 进入 Maximized 后窗口矩形可外扩尺寸框，客户区由 WM_NCCALCSIZE 裁回本矩形。</summary>
     private Rect WorkAreaPx()
     {
         if (Win32.TryGetWorkArea(new WindowInteropHelper(this).Handle, out var area))
@@ -192,6 +210,16 @@ public partial class MainWindow : Window
                     (int)Math.Ceiling(MinWidth * dpi.DpiScaleX),
                     (int)Math.Ceiling(MinHeight * dpi.DpiScaleY));
             }
+        }
+        else if (msg == Win32.WM_NCCALCSIZE && WindowState == WindowState.Maximized)
+        {
+            handled = Win32.TryApplyMaximizedClient(hwnd, lParam, wParam != IntPtr.Zero);
+        }
+        else if (msg == Win32.WM_SYSCOMMAND)
+        {
+            var cmd = wParam.ToInt64() & 0xFFF0;
+            if (cmd == Win32.SC_MINIMIZE)
+                PrepareNativeMinimize();
         }
         else if (msg == Win32.WM_WINDOWPOSCHANGING)
         {
@@ -344,9 +372,12 @@ public partial class MainWindow : Window
         internal const int VK_LBUTTON = 0x01;
         internal const int WM_NCLBUTTONDOWN = 0x00A1;
         internal const int WM_GETMINMAXINFO = 0x0024;
+        internal const int WM_NCCALCSIZE = 0x0083;
         internal const int WM_WINDOWPOSCHANGING = 0x0046;
         internal const int WM_WINDOWPOSCHANGED = 0x0047;
         internal const int WM_QUERYENDSESSION = 0x0011;
+        internal const int WM_SYSCOMMAND = 0x0112;
+        internal const int SC_MINIMIZE = 0xF020;
         internal const int HTCAPTION = 0x2;
         internal const int HTLEFT = 10;
         internal const int HTRIGHT = 11;
@@ -366,6 +397,18 @@ public partial class MainWindow : Window
 
         [DllImport("user32.dll")]
         internal static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+        private const int SmCxFrame = 32;
+        private const int SmCxPaddedBorder = 92;
+
+        [DllImport("user32.dll")]
+        private static extern int GetSystemMetrics(int nIndex);
+
+        internal static int CaptionFramePx()
+        {
+            var frame = GetSystemMetrics(SmCxFrame) + GetSystemMetrics(SmCxPaddedBorder);
+            return frame < 0 ? 0 : frame;
+        }
 
         [DllImport("user32.dll")]
         private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);
@@ -398,9 +441,41 @@ public partial class MainWindow : Window
             var place = MaximizeWorkArea.FromMonitor(
                 info.Work.Left, info.Work.Top, info.Work.Right, info.Work.Bottom,
                 info.Monitor.Left, info.Monitor.Top);
+            // WS_CAPTION 的默认最大化会外扩尺寸框；按同样像素写回，WPF 才能进入 Maximized。
+            place = MaximizeWorkArea.ExpandByFrame(place, CaptionFramePx());
             mmi.MaxPosition = new Point { X = place.X, Y = place.Y };
             mmi.MaxSize = new Point { X = place.Width, Y = place.Height };
             Marshal.StructureToPtr(mmi, lParam, fDeleteOld: true);
+            return true;
+        }
+
+        /// <summary>最大化时把客户区裁在工作区内，外扩的尺寸框留在屏幕外。</summary>
+        internal static bool TryApplyMaximizedClient(IntPtr hwnd, IntPtr lParam, bool hasParams)
+        {
+            if (!TryGetWorkArea(hwnd, out var work)) return false;
+            var workLeft = (int)work.Left;
+            var workTop = (int)work.Top;
+            var workRight = (int)(work.Left + work.Width);
+            var workBottom = (int)(work.Top + work.Height);
+
+            if (hasParams)
+            {
+                var p = Marshal.PtrToStructure<NcCalcSizeParams>(lParam);
+                var client = MaximizeWorkArea.ClientInWorkArea(
+                    p.Rgrc0.Left, p.Rgrc0.Top, p.Rgrc0.Right, p.Rgrc0.Bottom,
+                    workLeft, workTop, workRight, workBottom);
+                p.Rgrc0 = new Rect { Left = client.Left, Top = client.Top, Right = client.Right, Bottom = client.Bottom };
+                Marshal.StructureToPtr(p, lParam, fDeleteOld: false);
+            }
+            else
+            {
+                var r = Marshal.PtrToStructure<Rect>(lParam);
+                var client = MaximizeWorkArea.ClientInWorkArea(
+                    r.Left, r.Top, r.Right, r.Bottom,
+                    workLeft, workTop, workRight, workBottom);
+                r = new Rect { Left = client.Left, Top = client.Top, Right = client.Right, Bottom = client.Bottom };
+                Marshal.StructureToPtr(r, lParam, fDeleteOld: false);
+            }
             return true;
         }
 
@@ -426,6 +501,15 @@ public partial class MainWindow : Window
             public int Top;
             public int Right;
             public int Bottom;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct NcCalcSizeParams
+        {
+            public Rect Rgrc0;
+            public Rect Rgrc1;
+            public Rect Rgrc2;
+            public IntPtr LpPos;
         }
 
         [StructLayout(LayoutKind.Sequential)]
