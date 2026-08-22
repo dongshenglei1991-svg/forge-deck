@@ -1,8 +1,26 @@
-import type { AppInfo, FsEntry, FsListResult, HiddenTool, LaunchProfile, SettingsInfo, TerminalSessionInfo, ToolListItem } from './types';
+import type { AppInfo, FsEntry, FsListResult, FsReadImageResult, FsReadResult, HiddenTool, LaunchProfile, SettingsInfo, TerminalSessionInfo, ToolListItem } from './types';
 
 function e(name: string, path: string, isDirectory: boolean, extension: string): FsEntry {
   return { name, path, isDirectory, extension };
 }
+
+// 图片查看 Mock：1x1 透明 PNG（经典固定字节）+ 一张 ASCII 示意图 SVG（btoa 需纯 ASCII，文案用英文）
+const TINY_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+const MOCK_SVG = [
+  '<svg xmlns="http://www.w3.org/2000/svg" width="360" height="220" viewBox="0 0 360 220">',
+  '<rect width="360" height="220" fill="#0d1211"/>',
+  '<rect x="28" y="28" width="150" height="92" rx="10" fill="#14201b" stroke="#8fe3b0" stroke-width="2"/>',
+  '<text x="103" y="70" text-anchor="middle" fill="#8fe3b0" font-size="16" font-family="monospace">Mock SVG</text>',
+  '<text x="103" y="94" text-anchor="middle" fill="#b8c4bf" font-size="12" font-family="monospace">diagram.svg</text>',
+  '<rect x="210" y="60" width="120" height="120" rx="60" fill="#14201b" stroke="#8fe3b0" stroke-width="2"/>',
+  '<path d="M210 120 L330 120 M270 60 L270 180" stroke="#8fe3b0" stroke-width="1" opacity=".5"/>',
+  '</svg>',
+].join('');
+
+const IMAGE_MIME_BY_EXT: Record<string, string> = {
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+  bmp: 'image/bmp', webp: 'image/webp', ico: 'image/x-icon', svg: 'image/svg+xml',
+};
 
 export interface Bridge {
   request<T = unknown>(method: string, params?: unknown): Promise<T>;
@@ -148,6 +166,8 @@ class MockBridge implements Bridge {
     'C:\\Projects\\atlas-web': [
       e('src', 'C:\\Projects\\atlas-web\\src', true, ''),
       e('node_modules', 'C:\\Projects\\atlas-web\\node_modules', true, ''),
+      e('logo.png', 'C:\\Projects\\atlas-web\\logo.png', false, 'png'),
+      e('diagram.svg', 'C:\\Projects\\atlas-web\\diagram.svg', false, 'svg'),
       e('go.mod', 'C:\\Projects\\atlas-web\\go.mod', false, 'mod'),
       e('pom.xml', 'C:\\Projects\\atlas-web\\pom.xml', false, 'xml'),
       e('Program.cs', 'C:\\Projects\\atlas-web\\Program.cs', false, 'cs'),
@@ -282,6 +302,26 @@ class MockBridge implements Bridge {
       case 'workdirs.remove':
         this.workdirs.splice(this.workdirs.indexOf(p.path), 1);
         return this.workdirs;
+      case 'fs.readImage': {
+        const { path } = this.guardFs(p);
+        const kind = this.mockKind(path);
+        if (kind === 'dir') throw new Error('validation: 只能查看文件');
+        if (kind === 'missing') throw new Error('not_found: 文件不存在');
+        const ext = path.slice(path.lastIndexOf('.') + 1).toLowerCase();
+        const mime = IMAGE_MIME_BY_EXT[ext];
+        if (!mime) throw new Error('validation: 不支持的图片格式');
+        const svg = ext === 'svg';
+        const data = svg ? btoa(MOCK_SVG) : TINY_PNG;
+        return { data, mime, size: data.length } satisfies FsReadImageResult;
+      }
+      case 'fs.read': {
+        const { path } = this.guardFs(p);
+        const kind = this.mockKind(path);
+        if (kind === 'dir') throw new Error('validation: 只能查看文件');
+        if (kind === 'missing') throw new Error('not_found: 文件不存在');
+        const content = this.mockFileContent(path);
+        return { content, encoding: 'utf-8', size: content.length } satisfies FsReadResult;
+      }
       case 'fs.list': {
         const { path } = this.guardFs(p);
         const entries = this.mockTree[path];
@@ -395,6 +435,64 @@ class MockBridge implements Bridge {
       if (hit) return hit.isDirectory ? 'dir' : 'file';
     }
     return 'missing';
+  }
+
+  // 文本查看器的 Mock 内容：常用样例文件给真实语法样例（可演示高亮），其余给通用说明
+  private readonly mockFiles: Record<string, string> = {
+    'c:\\projects\\atlas-web\\readme.md': [
+      '# Atlas Web',
+      '',
+      '本地 AI 编程工具的示例工作区。',
+      '',
+      '## 快速开始',
+      '',
+      '```bash',
+      'npm install',
+      'npm run dev',
+      '```',
+      '',
+      '## 说明',
+      '',
+      '- 双击文件树中的文件即可打开文本查看器',
+      '- 查看器为只读，带行号与语法高亮',
+      '',
+    ].join('\n'),
+    'c:\\projects\\atlas-web\\package.json': JSON.stringify({
+      name: 'atlas-web',
+      version: '0.1.0',
+      private: true,
+      scripts: { dev: 'vite', build: 'tsc -b && vite build' },
+      dependencies: { react: '^19.2.0', 'react-dom': '^19.2.0' },
+    }, null, 2),
+    'c:\\projects\\atlas-web\\src\\app.tsx': [
+      "import { useState } from 'react';",
+      '',
+      'export function App() {',
+      "  const [count, setCount] = useState(0);",
+      '  return (',
+      '    <main>',
+      '      <h1>Atlas Web</h1>',
+      '      <button onClick={() => setCount(count + 1)}>点击 {count} 次</button>',
+      '    </main>',
+      '  );',
+      '}',
+      '',
+    ].join('\n'),
+    'c:\\projects\\atlas-web\\src\\main.ts': [
+      "import { createRoot } from 'react-dom/client';",
+      "import { App } from './App';",
+      '',
+      "createRoot(document.getElementById('root')!).render(<App />);",
+      '',
+    ].join('\n'),
+    'c:\\projects\\atlas-web\\.gitignore': ['node_modules/', 'dist/', '*.log', '.env', ''].join('\n'),
+  };
+
+  private mockFileContent(path: string): string {
+    const hit = this.mockFiles[path.toLowerCase()];
+    if (hit) return hit;
+    const name = path.slice(Math.max(path.lastIndexOf('\\'), path.lastIndexOf('/')) + 1);
+    return `# ${name}\n\n这是 Mock 桥生成的示例内容。\n在 WebView2 宿主中运行时，这里会显示文件的真实内容（自动检测 UTF-8 / GBK 编码）。\n`;
   }
 
   private mockOutput(id: string, title: string) {

@@ -15,7 +15,7 @@ public sealed record SettingsInfo(AppSettings Settings, IReadOnlyList<CommonDir>
 
 /// <summary>业务方法接线。线程模型：handler 由宿主在 UI 线程串行调用，ConfigStore 变更无需加锁；
 /// 例外：tools.rescan——扫描与合并已 Task.Run 化，且只读脱离 store 的快照、不触碰 ConfigStore，
-/// 合并结果回 UI 线程写回；fs.list / fs.open / fs.openWithSystem / fs.delete——磁盘与壳操作亦 Task.Run，不碰 ConfigStore。
+/// 合并结果回 UI 线程写回；fs.list / fs.read / fs.readImage / fs.open / fs.openWithSystem / fs.delete——磁盘与壳操作亦 Task.Run，不碰 ConfigStore。
 /// 终端 Output/Exited/Changed 事件来自后台线程，经 Dispatcher.Emit 透传
 /// （Emit 仅做序列化，不写共享状态）。</summary>
 public sealed class ForgeDeckBridge
@@ -350,6 +350,18 @@ public sealed class ForgeDeckBridge
         {
             _terminal.Close(p?.GetProperty("sessionId").GetString() ?? "");
             return Task.FromResult<object?>(null);
+        });
+
+        Dispatcher.Register("fs.read", async p =>
+        {
+            var (path, root) = FsArgs(p);
+            return await Task.Run(() => FileReader.Read(path, root));
+        });
+
+        Dispatcher.Register("fs.readImage", async p =>
+        {
+            var (path, root) = FsArgs(p);
+            return await Task.Run(() => ImageReader.Read(path, root));
         });
 
         Dispatcher.Register("fs.list", async p =>

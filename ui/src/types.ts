@@ -80,3 +80,15 @@ export interface FsListResult {
   path: string;
   entries: FsEntry[];
 }
+
+export interface FsReadResult {
+  content: string;
+  encoding: string;
+  size: number;
+}
+
+export interface FsReadImageResult {
+  data: string;
+  mime: string;
+  size: number;
+}

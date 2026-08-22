@@ -59,10 +59,11 @@ async function copyText(text: string) {
   }
 }
 
-export function FileTreePanel({ root, onError, onInfo }: {
+export function FileTreePanel({ root, onError, onInfo, onOpenFile }: {
   root: string | null;
   onError: (msg: string) => void;
   onInfo?: (msg: string) => void;
+  onOpenFile?: (path: string) => void;
 }) {
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [layers, setLayers] = useState<Map<string, Layer>>(() => new Map());
@@ -263,6 +264,7 @@ export function FileTreePanel({ root, onError, onInfo }: {
             menuPath={menu?.entry.path ?? null}
             onToggle={toggle}
             onMenu={openMenu}
+            onOpenFile={onOpenFile}
           />
         )}
       </div>
@@ -277,6 +279,11 @@ export function FileTreePanel({ root, onError, onInfo }: {
           {menu.entry.isDirectory && (
             <button type="button" role="menuitem" onClick={() => { refreshDir(menu.entry.path); setMenu(null); }}>
               刷新
+            </button>
+          )}
+          {!menu.entry.isDirectory && onOpenFile && (
+            <button type="button" role="menuitem" onClick={() => { onOpenFile(menu.entry.path); setMenu(null); }}>
+              查看
             </button>
           )}
           {!menu.entry.isDirectory && (
@@ -327,11 +334,12 @@ export function FileTreePanel({ root, onError, onInfo }: {
   );
 }
 
-function LayerView({ layer, depth, expanded, layers, menuPath, onToggle, onMenu }: {
+function LayerView({ layer, depth, expanded, layers, menuPath, onToggle, onMenu, onOpenFile }: {
   layer: Layer | undefined; depth: number; expanded: Set<string>;
   layers: Map<string, Layer>; menuPath: string | null;
   onToggle: (e: FsEntry) => void;
   onMenu: (e: MouseEvent, entry: FsEntry) => void;
+  onOpenFile?: (path: string) => void;
 }) {
   const pad = { paddingLeft: 8 + depth * 12 };
   if (!layer || layer.kind === 'loading') return <div className="file-tree-msg" style={pad}>读取中…</div>;
@@ -352,17 +360,19 @@ function LayerView({ layer, depth, expanded, layers, menuPath, onToggle, onMenu 
           menuPath={menuPath}
           onToggle={onToggle}
           onMenu={onMenu}
+          onOpenFile={onOpenFile}
         />
       ))}
     </>
   );
 }
 
-function TreeNode({ entry, depth, expanded, layers, menuPath, onToggle, onMenu }: {
+function TreeNode({ entry, depth, expanded, layers, menuPath, onToggle, onMenu, onOpenFile }: {
   entry: FsEntry; depth: number; expanded: Set<string>;
   layers: Map<string, Layer>; menuPath: string | null;
   onToggle: (e: FsEntry) => void;
   onMenu: (e: MouseEvent, entry: FsEntry) => void;
+  onOpenFile?: (path: string) => void;
 }) {
   const open = entry.isDirectory && expanded.has(entry.path);
   const badge = fileBadge(entry.name, entry.isDirectory, entry.extension);
@@ -373,6 +383,8 @@ function TreeNode({ entry, depth, expanded, layers, menuPath, onToggle, onMenu }
         className={`file-tree-row${entry.isDirectory ? ' dir' : ''}${active ? ' is-menu' : ''}`}
         style={{ paddingLeft: 8 + depth * 12 }}
         onClick={() => onToggle(entry)}
+        // 双击文件打开查看器（目录双击沿用单击的展开/收合）
+        onDoubleClick={() => { if (!entry.isDirectory && onOpenFile) onOpenFile(entry.path); }}
         onContextMenu={(e) => onMenu(e, entry)}
       >
         <span className={`file-chevron${open ? ' open' : ''}${entry.isDirectory ? '' : ' hidden'}`}>▸</span>
@@ -395,6 +407,7 @@ function TreeNode({ entry, depth, expanded, layers, menuPath, onToggle, onMenu }
           menuPath={menuPath}
           onToggle={onToggle}
           onMenu={onMenu}
+          onOpenFile={onOpenFile}
         />
       )}
     </>
