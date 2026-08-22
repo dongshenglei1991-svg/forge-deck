@@ -22,6 +22,7 @@ public partial class MainWindow : Window
     private readonly ForgeDeckBridge _bridge;
     private readonly TrayIconHost _tray = new();
     private readonly WindowMotion _motion;
+    private WindowGlow? _glow;
     private bool _confirmedExit;
     private bool _forceExit;
     private WindowState _trayRestoreState = WindowState.Normal;
@@ -149,6 +150,7 @@ public partial class MainWindow : Window
                 chrome.ResizeBorderThickness = WindowState == WindowState.Maximized
                     ? new Thickness(0) : new Thickness(8);
             d.Emit("window.state.changed", new { maximized = WindowState == WindowState.Maximized });
+            _glow?.Sync();
         };
     }
 
@@ -159,6 +161,8 @@ public partial class MainWindow : Window
         {
             source.AddHook(WndProc);
             WindowMotion.InstallSystemTransitions(source.Handle);
+            _glow = new WindowGlow(this);
+            _glow.Sync();
         }
     }
 
@@ -192,6 +196,10 @@ public partial class MainWindow : Window
         else if (msg == Win32.WM_WINDOWPOSCHANGING)
         {
             _motion.OnWindowPosChanging(lParam);
+        }
+        else if (msg == Win32.WM_WINDOWPOSCHANGED)
+        {
+            _glow?.Sync();
         }
         else if (msg == Win32.WM_QUERYENDSESSION)
         {
@@ -261,6 +269,8 @@ public partial class MainWindow : Window
         Background = brush;
         Root.Background = brush;
         Web.DefaultBackgroundColor = System.Drawing.Color.FromArgb(bg.A, bg.R, bg.G, bg.B);
+        _glow?.ApplyColor();
+        _glow?.Sync();
     }
 
     private void OnSystemPreferenceChanged(object sender, UserPreferenceChangedEventArgs e)
@@ -335,6 +345,7 @@ public partial class MainWindow : Window
         internal const int WM_NCLBUTTONDOWN = 0x00A1;
         internal const int WM_GETMINMAXINFO = 0x0024;
         internal const int WM_WINDOWPOSCHANGING = 0x0046;
+        internal const int WM_WINDOWPOSCHANGED = 0x0047;
         internal const int WM_QUERYENDSESSION = 0x0011;
         internal const int HTCAPTION = 0x2;
         internal const int HTLEFT = 10;

@@ -1,8 +1,10 @@
 :root {
       --accent-hue: 155;
+      --accent: oklch(78% 0.15 var(--accent-hue));
+      --accent-soft: color-mix(in oklch, var(--accent) 14%, transparent);
       --bg: oklch(18% 0.025 170); --surface: oklch(22% 0.028 170); --fg: oklch(94% 0.018 170);
-      --muted: oklch(68% 0.025 170); --border: oklch(32% 0.03 170); --accent: oklch(78% 0.15 var(--accent-hue));
-      --accent-soft: color-mix(in oklch, var(--accent) 14%, transparent); --fg-soft: color-mix(in oklch, var(--fg) 6%, transparent); --danger: #e5484d;
+      --muted: oklch(68% 0.025 170); --border: oklch(32% 0.03 170);
+      --fg-soft: color-mix(in oklch, var(--fg) 6%, transparent); --danger: #e5484d;
       --term-bg: oklch(13% .02 170); --term-fg: oklch(78% .02 170);
       --shadow: color-mix(in oklch, black 55%, transparent);
       --font-display: 'Iowan Old Style', 'Charter', Georgia, 'Times New Roman', 'Microsoft YaHei UI', 'Microsoft YaHei', '微软雅黑', sans-serif;
@@ -12,8 +14,9 @@
       color-scheme: dark;
     }
     html[data-theme="light"] {
+      --accent: oklch(46% 0.14 var(--accent-hue));
       --bg: oklch(97% 0.01 170); --surface: oklch(99.4% 0.004 170); --fg: oklch(22% 0.03 170);
-      --muted: oklch(46% 0.02 170); --border: oklch(88% 0.015 170); --accent: oklch(46% 0.14 var(--accent-hue));
+      --muted: oklch(46% 0.02 170); --border: oklch(88% 0.015 170);
       --term-bg: oklch(94.5% 0.012 170); --term-fg: oklch(32% 0.02 170);
       --shadow: color-mix(in oklch, oklch(30% 0.02 170) 28%, transparent);
       color-scheme: light;
